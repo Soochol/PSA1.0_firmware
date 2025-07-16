@@ -2,7 +2,12 @@
 
 static const char TAG[] = __FILE__;
 
-HardwareSerial STMSerial(2); // use ESP32 UART2
+// ===== UART Configuration =====
+// UART0 (Serial): PC Python 테스트 프로토콜 통신용
+// UART2 (DebugSerial): 디버깅 로그 출력용
+
+// HardwareSerial DebugSerial(2);  // UART2 for debug logs - moved to globals.h
+// STMSerial now directly uses the standardized serial definition from globals.h
 
 // Global variables for message parsing
 static MessageState currentState = MessageState::WAITING_START;
@@ -12,54 +17,19 @@ static size_t bufferIndex = 0;
 static size_t expectedDataLength = 0;
 
 // Global variables for sensor data storage
-static SensorReading lastSensorReading = {};
 static bool sensorDataAvailable = false;
 
 // Global variables for device state tracking
 static DeviceMode currentDeviceMode = DeviceMode::WAITING;  // Default mode
 static uint8_t lastErrorCode = 0;  // Last error code received (0 = no error)
 
+// Global variables for TinyML processing
+static uint8_t tinyMLInferenceResult = 0;
+static uint8_t finalResult = 0;
+
 // Global variables for command state management (ESP→STM)
 static PendingCommand currentPendingCommand = {};
 static bool waitingForResponse = false;
-
-// Global variables for async response data storage
-static float cachedSleepTemp = 30.0f;
-static float cachedWaitingTemp = 38.0f;
-static float cachedOperatingTemp = 52.0f;
-static float cachedTempLimit = 80.0f;
-static uint8_t cachedFanLevel = 0;
-static uint8_t cachedMaxFanLevel = 10;
-static uint8_t cachedCoolingFanLevel = 0;
-static uint8_t cachedMaxCoolingFanLevel = 10;
-static uint8_t cachedSpeakerVolume = 5;
-// Heat pad variables removed - deprecated functionality
-
-// Timeout values for different modes (1-65535 seconds)
-static uint16_t cachedForceUpTimeout = 10;
-static uint16_t cachedForceOnTimeout = 60;
-static uint16_t cachedForceDownTimeout = 15;
-static uint16_t cachedWaitingTimeout = 255;
-
-// ForceDown detection delays (in 100ms units)
-static uint8_t cachedPoseDetectionDelay = 15;    // 1.5s in 100ms units
-static uint8_t cachedObjectDetectionDelay = 0;   // 0s in 100ms units
-
-// Validity flags for cached data
-static bool sleepTempValid = false;
-static bool waitingTempValid = false;
-static bool operatingTempValid = false;
-static bool tempLimitValid = false;
-static bool fanLevelValid = false;
-static bool coolingFanLevelValid = false;
-static bool speakerVolumeValid = false;
-// heatPadLevelValid removed - deprecated functionality
-static bool timeoutsValid = false;
-static bool detectionDelayValid = false;
-
-// TinyML related variables (maintained from original)
-uint8_t tinyMLInferenceResult = 0;
-uint8_t finalResult = 0;
 
 // Variables for message construction
 byte LEN;
@@ -111,42 +81,60 @@ void nackResponse() {
     ESP_LOGW(TAG, "NACK: No response sent as per protocol");
 }
 
-// Unified message construction function - eliminate code duplication
-void buildMessage(usartMessage& message, byte command, const byte* data = nullptr, size_t dataLen = 0) {
-    message.reset();
-    message.appendByte(STM);
+// Stack-based message construction function - improved efficiency
+size_t buildMessage(uint8_t* buffer, byte command, const byte* data, size_t dataLen) {
+    if (!buffer) return 0;  // Safety check
     
-    // LEN = DIR + CMD + DATA + CHKSUM + ETX length
-    LEN = 4 + dataLen;  // DIR(1) + CMD(1) + CHKSUM(1) + ETX(1) + DATA(dataLen)
-    message.appendByte(LEN);
-    message.appendByte(ESP_TO_STM_DIR);
-    message.appendByte(command);
+    size_t index = 0;
     
-    // Add data
+    // 1. STM (start byte)
+    buffer[index++] = STM;  // 0x02
+    
+    // 2. LEN (length: DIR + CMD + DATA + CHKSUM + ETX)
+    uint8_t length = 4 + dataLen;  // DIR(1) + CMD(1) + CHKSUM(1) + ETX(1) + DATA(dataLen)
+    buffer[index++] = length;
+    
+    // 3. DIR (direction)
+    buffer[index++] = ESP_TO_STM_DIR;  // 0x20
+    
+    // 4. CMD (command)
+    buffer[index++] = command;
+    
+    // 5. DATA (payload data)
     if (data && dataLen > 0) {
         for (size_t i = 0; i < dataLen; i++) {
-            message.appendByte(data[i]);
+            buffer[index++] = data[i];
         }
     }
     
-    // Calculate and add checksum
-    CHKSUM = calculateChecksum(reinterpret_cast<const byte*>(message.getBuffer()), message.getCurrentSize() + 2);
-    message.appendByte(CHKSUM);
-    message.appendByte(ETX);
+    // 6. CHKSUM (checksum)
+    uint8_t checksum = calculateChecksum(buffer, index + 2);  // +2 for CHKSUM and ETX
+    buffer[index++] = checksum;
+    
+    // 7. ETX (end byte)
+    buffer[index++] = ETX;  // 0x03
+    
+    return index;  // Total message length
 }
 
-// Efficient command transmission function (eliminate duplication)
-bool sendCommandSafe(byte command, const byte* data = nullptr, size_t dataLen = 0) {
-    usartMessage message;
-    buildMessage(message, command, data, dataLen);
+// Efficient command transmission function - stack-based buffer
+bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
+    // Stack-based buffer - no dynamic allocation
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
     
-    size_t bytesWritten = STMSerial.write(
-        reinterpret_cast<const uint8_t*>(message.getBuffer()), 
-        message.getCurrentSize()
-    );
+    // Build message using new stack-based function
+    size_t messageSize = buildMessage(buffer, command, data, dataLen);
+    if (messageSize == 0) {
+        ESP_LOGE(TAG, "Failed to build message for command 0x%02X", command);
+        return false;
+    }
     
-    if (bytesWritten != message.getCurrentSize()) {
-        ESP_LOGW(TAG, "Failed to send complete command 0x%02X", command);
+    // Send message via UART
+    size_t bytesWritten = STMSerial.write(buffer, messageSize);
+    
+    if (bytesWritten != messageSize) {
+        ESP_LOGW(TAG, "Failed to send complete command 0x%02X (%zu/%zu bytes)", 
+                 command, bytesWritten, messageSize);
         return false;
     }
     
@@ -217,6 +205,7 @@ bool parseIncomingByte(uint8_t byte) {
             currentMessage.etx = byte;
             messageBuffer[bufferIndex++] = byte;
             currentState = MessageState::MESSAGE_COMPLETE;
+            ESP_LOGI(TAG, "MSG: 0x%02X (%s)", currentMessage.command, getCommandName(currentMessage.command));
             return true; // Message complete
             
         default:
@@ -236,6 +225,8 @@ void resetParser() {
 // Message type specific handlers
 void handleStatusMessage() {
     if (currentMessage.command == statMessage) {
+        ESP_LOGI(TAG, "Sensor data (%d bytes)", 
+                 currentMessage.dataLength);
         parseSensorData(currentMessage.data, currentMessage.dataLength);
         sensorDataAvailable = true;
         sendResponse(currentMessage.command);
@@ -243,6 +234,36 @@ void handleStatusMessage() {
         // Maintain existing TinyML logic
         biosigData1Min.addData(allData);
         predictionInput.addData(allData);
+        
+        // TinyML inference and STM control logic
+        if (predictionInput.index >= TINYML_BUFFER_LEN && 
+            predictionInput.tof1SecMin < TOF_THRESHOLD && 
+            predictionInput.tofBuffer[TINYML_BUFFER_LEN-1] > predictionInput.tofBuffer[TINYML_BUFFER_LEN - 2] + 10) {
+            
+            tinyMLInferenceResult = tinyMLInference(predictionInput);
+            
+            if (tinyMLInferenceResult == 1) { 
+                finalResult += 1; 
+            } else { 
+                finalResult = 0; 
+            }
+
+#ifdef ADJUST_TINYML_PREDICTION
+            if (predictionInput.calculateTofSlope(15, 3)) {
+                ESP_LOGI(TAG, "Original: %d, adjusted prediction result to 1", tinyMLInferenceResult);
+                tinyMLInferenceResult = 1;                       
+                finalResult = 2;
+            }
+#endif
+        }
+        
+        // STM FORCE_UP control
+        if (finalResult == 2) {
+            ESP_LOGI(TAG, "[STM-SIM] TinyML trigger detected: ToF=%d, sending CONTROL: Set Device Mode to FORCE_UP", 
+                     predictionInput.tofBuffer[TINYML_BUFFER_LEN-1]);
+            setDeviceMode(DeviceMode::FORCE_UP);
+            finalResult = 0;
+        }
     }
 }
 
@@ -253,7 +274,7 @@ void handleModeChangeEvent() {
         if (modeValue <= 5) {  // Valid mode range: 0-5
             currentDeviceMode = static_cast<DeviceMode>(modeValue);
             const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
-            ESP_LOGI(TAG, "Device mode changed to: %s (%d)", modeNames[modeValue], modeValue);
+            ESP_LOGI(TAG, "Mode: %s (%d)", modeNames[modeValue], modeValue);
         } else {
             ESP_LOGW(TAG, "Invalid mode value received: %d", modeValue);
         }
@@ -263,25 +284,29 @@ void handleModeChangeEvent() {
 }
 
 void handleEventMessage() {
+    ESP_LOGI(TAG, "EVENT: %s", getCommandName(currentMessage.command));
+    
     switch (currentMessage.command) {
         case evtInitStart:   // 0x80
-            ESP_LOGI(TAG, "STM initialization started");
+            ESP_LOGI(TAG, "STM init started");
             break;
         case evtInitResult:  // 0x81
-            ESP_LOGI(TAG, "STM initialization completed");
+            ESP_LOGI(TAG, "STM init complete");
             break;
         case evtMode:        // 0x82
+            ESP_LOGI(TAG, "Mode change event");
             handleModeChangeEvent();
             break;
         default:
-            ESP_LOGW(TAG, "Unknown event: 0x%02X", currentMessage.command);
+            ESP_LOGW(TAG, "Unknown event: 0x%02X (%s)", 
+                     currentMessage.command, getCommandName(currentMessage.command));
             break;
     }
     sendResponse(currentMessage.command);
 }
 
 void handleErrorMessage() {
-    ESP_LOGE(TAG, "Error received: 0x%02X", currentMessage.command);
+    ESP_LOGE(TAG, "ERROR: %s", getCommandName(currentMessage.command));
     if (currentMessage.dataLength > 0) {
         uint8_t errorCode = currentMessage.data[0];
         lastErrorCode = errorCode;  // Update error state
@@ -295,7 +320,7 @@ void handleErrorMessage() {
         };
         
         if (errorCode >= 1 && errorCode <= 4) {
-            ESP_LOGE(TAG, "Error: %s (Code: %d)", errorMessages[errorCode], errorCode);
+            ESP_LOGE(TAG, "%s (Code: %d)", errorMessages[errorCode], errorCode);
         } else {
             ESP_LOGE(TAG, "Unknown error code: %d", errorCode);
         }
@@ -319,7 +344,7 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Gyro data - Left (6 bytes: X, Y, Z axes * 2 bytes each)
     for (int i = 0; i < 3; i++) {
         if (index + 1 < length) {
-            lastSensorReading.leftGyro[i] = (data[index] << 8) | data[index + 1];
+            allData.L_gyro[i] = (data[index] << 8) | data[index + 1];
             index += PRESSURE_DATA_SIZE;
         }
     }
@@ -327,7 +352,7 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Accelerometer data - Left (6 bytes: X, Y, Z axes * 2 bytes each)
     for (int i = 0; i < 3; i++) {
         if (index + 1 < length) {
-            lastSensorReading.leftAccel[i] = (data[index] << 8) | data[index + 1];
+            allData.L_accel[i] = (data[index] << 8) | data[index + 1];
             index += PRESSURE_DATA_SIZE;
         }
     }
@@ -336,7 +361,7 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Gyro data - Right (6 bytes: X, Y, Z axes * 2 bytes each)
     for (int i = 0; i < 3; i++) {
         if (index + 1 < length) {
-            lastSensorReading.rightGyro[i] = (data[index] << 8) | data[index + 1];
+            allData.R_gyro[i] = (data[index] << 8) | data[index + 1];
             index += PRESSURE_DATA_SIZE;
         }
     }
@@ -344,7 +369,7 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Accelerometer data - Right (6 bytes: X, Y, Z axes * 2 bytes each)
     for (int i = 0; i < 3; i++) {
         if (index + 1 < length) {
-            lastSensorReading.rightAccel[i] = (data[index] << 8) | data[index + 1];
+            allData.R_accel[i] = (data[index] << 8) | data[index + 1];
             index += PRESSURE_DATA_SIZE;
         }
     }
@@ -352,82 +377,60 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Pressure sensors (4 bytes total: L + R)
     // Left pressure sensor (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.leftPressure = (data[index] << 8) | data[index + 1];
+        allData.L_ads = (data[index] << 8) | data[index + 1];
         index += PRESSURE_DATA_SIZE;
     }
     // Right pressure sensor (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.rightPressure = (data[index] << 8) | data[index + 1];
+        allData.R_ads = (data[index] << 8) | data[index + 1];
         index += PRESSURE_DATA_SIZE;
     }
     
     // Temperature sensors (6 bytes total: 3 sensors * 2 bytes each)
     // Outside temperature (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.outsideTemp = (data[index] << 8) | data[index + 1];
+        allData.outTemp = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     // Board temperature (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.boardTemp = (data[index] << 8) | data[index + 1];
+        allData.boardTemp = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     // Actuator temperature (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.actuatorTemp = (data[index] << 8) | data[index + 1];
+        allData.lmaTemp = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     
     // Other sensors (6 bytes total: 3 sensors * 2 bytes each)
     // Actuator displacement (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.actuatorDisplacement = (data[index] << 8) | data[index + 1];
+        allData.lmaLength = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     // Object distance (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.objectDistance = (data[index] << 8) | data[index + 1];
+        allData.objDistance = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     // Battery voltage (2 bytes)
     if (index + 1 < length) {
-        lastSensorReading.batteryVoltage = (data[index] << 8) | data[index + 1];
+        allData.battery = (data[index] << 8) | data[index + 1];
         index += TEMPERATURE_DATA_SIZE;
     }
     
     // IMU events (2 bytes total: L + R)
     // Left IMU event (1 byte)
     if (index < length) {
-        lastSensorReading.leftIMUEvent = data[index];
+        allData.leftIMUEvent = data[index];
         index += IMU_EVENT_SIZE;
     }
     // Right IMU event (1 byte)
     if (index < length) {
-        lastSensorReading.rightIMUEvent = data[index];
+        allData.rightIMUEvent = data[index];
         index += IMU_EVENT_SIZE;
     }
-    
-    // Update existing allData structure as well (backward compatibility)
-    allData.L_gyro[0] = lastSensorReading.leftGyro[0];
-    allData.L_gyro[1] = lastSensorReading.leftGyro[1];
-    allData.L_gyro[2] = lastSensorReading.leftGyro[2];
-    allData.L_accel[0] = lastSensorReading.leftAccel[0];
-    allData.L_accel[1] = lastSensorReading.leftAccel[1];
-    allData.L_accel[2] = lastSensorReading.leftAccel[2];
-    allData.R_gyro[0] = lastSensorReading.rightGyro[0];
-    allData.R_gyro[1] = lastSensorReading.rightGyro[1];
-    allData.R_gyro[2] = lastSensorReading.rightGyro[2];
-    allData.R_accel[0] = lastSensorReading.rightAccel[0];
-    allData.R_accel[1] = lastSensorReading.rightAccel[1];
-    allData.R_accel[2] = lastSensorReading.rightAccel[2];
-    allData.L_ads = lastSensorReading.leftPressure;
-    allData.R_ads = lastSensorReading.rightPressure;
-    allData.outTemp = lastSensorReading.outsideTemp;
-    allData.boardTemp = lastSensorReading.boardTemp;
-    allData.lmaTemp = lastSensorReading.actuatorTemp;
-    allData.lmaLength = lastSensorReading.actuatorDisplacement;
-    allData.objDistance = lastSensorReading.objectDistance;
-    allData.battery = lastSensorReading.batteryVoltage;
 }
 
 void usartMasterHandler(void *pvParameters) {
@@ -446,13 +449,13 @@ void usartMasterHandler(void *pvParameters) {
             if (parseIncomingByte(incomingByte)) {
                 // Message complete, verify checksum
                 if (!currentMessage.isValid()) {
-                    ESP_LOGW(TAG, "Invalid message format");
+                    ESP_LOGW(TAG, "Invalid format: STM:0x%02X, ETX:0x%02X", currentMessage.stm, currentMessage.etx);
                     resetParser();
                     continue;
                 }
                 
                 if (!checkMessage(messageBuffer, bufferIndex)) {
-                    ESP_LOGW(TAG, "Checksum verification failed");
+                    ESP_LOGW(TAG, "Checksum FAIL");
                     resetParser();
                     continue;
                 }
@@ -461,6 +464,8 @@ void usartMasterHandler(void *pvParameters) {
                 if (currentMessage.direction == STM_TO_ESP_DIR) {
                     // Classify and process message by command type
                     CommandType cmdType = currentMessage.getCommandType();
+                    
+                    ESP_LOGI(TAG, "→ %s", getCommandName(currentMessage.command));
                     
                     switch (cmdType) {
                         case CommandType::STATUS:      // 0x70 - STM spontaneous sensor data
@@ -491,13 +496,11 @@ void usartMasterHandler(void *pvParameters) {
                             break;
                             
                         default:
-                            ESP_LOGW(TAG, "Unknown command type: 0x%02X (full command: 0x%02X)", 
-                                     static_cast<uint8_t>(cmdType), currentMessage.command);
+                            ESP_LOGW(TAG, "Unknown CMD: 0x%02X", currentMessage.command);
                             break;
                     }
                 } else {
-                    ESP_LOGW(TAG, "Invalid message direction: 0x%02X (expected STM→ESP: 0x%02X)", 
-                             currentMessage.direction, STM_TO_ESP_DIR);
+                    ESP_LOGW(TAG, "Invalid direction: 0x%02X", currentMessage.direction);
                 }
                 
                 resetParser();
@@ -512,21 +515,29 @@ void usartMasterHandler(void *pvParameters) {
 }
 
 bool initUartMaster() {
-
+    // Initialize UART2 for STM communication (simulation mode)
     STMSerial.begin(115200, SERIAL_8N1, ESP_U2_RXD, ESP_U2_TXD);
-  	delay(100);
-	// STMSerial.println("(ESP-STM Serial: ON)");
-
-    xTaskCreatePinnedToCore(usartMasterHandler,
-                            "usartMasterHandler",
-                            UART_TASK_STACK,
-                            NULL,
-                            UART_TASK_PRI,
-                            &TasUsartMaster_h,
-                            UART_TASK_CORE);
-    ESP_LOGI(TAG, "ESP-STM USART  initialized...");
     
-  	delay(100);
+    // Initialize command state variables
+    currentPendingCommand.reset();
+    waitingForResponse = false;
+    
+    // Initialize message parser
+    resetParser();
+    
+    // Create UART task
+    xTaskCreatePinnedToCore(
+        usartMasterHandler,
+        "UART_MASTER_TASK",
+        UART_TASK_STACK,
+        NULL,
+        UART_TASK_PRI,
+        &TasUsartMaster_h,
+        UART_TASK_CORE
+    );
+    
+    DebugSerial.println("[STM-SIM] UART Master initialized");
+    return true;
 }
 
 // =============================================================================
@@ -535,17 +546,20 @@ bool initUartMaster() {
 
 void handleInitResponse() {
     // Handle INIT command ACKs (0x1X)
-    ESP_LOGI(TAG, "INIT ACK received for command 0x%02X", currentMessage.command);
+    ESP_LOGI(TAG, "INIT ACK received for command 0x%02X (%s)", 
+             currentMessage.command, getCommandName(currentMessage.command));
 }
 
 void handleRequestResponse() {
     // Handle REQUEST command responses with data (0x3X)
+    ESP_LOGI(TAG, "REQUEST response received for command 0x%02X (%s)", 
+             currentMessage.command, getCommandName(currentMessage.command));
+    
     switch (currentMessage.command) {
         case reqTempSleep:      // 0x30
             if (currentMessage.dataLength >= 2) {
-                cachedSleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                sleepTempValid = true;
-                ESP_LOGI(TAG, "Sleep temp updated: %.1f°C", cachedSleepTemp);
+                systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                ESP_LOGI(TAG, "Sleep temp response: %.1f°C", systemConfig.sleepTemp);
             } else {
                 ESP_LOGW(TAG, "Invalid sleep temp response length: %d", currentMessage.dataLength);
             }
@@ -553,9 +567,8 @@ void handleRequestResponse() {
             
         case reqTempWaiting:    // 0x31
             if (currentMessage.dataLength >= 2) {
-                cachedWaitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                waitingTempValid = true;
-                ESP_LOGI(TAG, "Waiting temp updated: %.1f°C", cachedWaitingTemp);
+                systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                ESP_LOGI(TAG, "Waiting temp response: %.1f°C", systemConfig.waitingTemp);
             } else {
                 ESP_LOGW(TAG, "Invalid waiting temp response length: %d", currentMessage.dataLength);
             }
@@ -563,9 +576,8 @@ void handleRequestResponse() {
             
         case reqTempForceUp:    // 0x32
             if (currentMessage.dataLength >= 2) {
-                cachedOperatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                operatingTempValid = true;
-                ESP_LOGI(TAG, "Operating temp updated: %.1f°C", cachedOperatingTemp);
+                systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                ESP_LOGI(TAG, "Operating temp response: %.1f°C", systemConfig.operatingTemp);
             } else {
                 ESP_LOGW(TAG, "Invalid operating temp response length: %d", currentMessage.dataLength);
             }
@@ -578,9 +590,8 @@ void handleRequestResponse() {
             
         case reqUpperTemp:      // 0x34
             if (currentMessage.dataLength >= 2) {
-                cachedTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                tempLimitValid = true;
-                ESP_LOGI(TAG, "Upper temp limit updated: %.1f°C", cachedTempLimit);
+                systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                ESP_LOGI(TAG, "Upper temp limit response: %.1f°C", systemConfig.upperTempLimit);
             } else {
                 ESP_LOGW(TAG, "Invalid upper temp limit response length: %d", currentMessage.dataLength);
             }
@@ -588,10 +599,9 @@ void handleRequestResponse() {
             
         case reqPWMCoolFan:     // 0x35
             if (currentMessage.dataLength >= 2) {
-                cachedCoolingFanLevel = currentMessage.data[0];
-                cachedMaxCoolingFanLevel = currentMessage.data[1];
-                coolingFanLevelValid = true;
-                ESP_LOGI(TAG, "Cooling fan level updated: %d/%d", cachedCoolingFanLevel, cachedMaxCoolingFanLevel);
+                systemConfig.coolingFanLevel = currentMessage.data[0];
+                systemConfig.maxCoolingFanLevel = currentMessage.data[1];
+                ESP_LOGI(TAG, "Cooling fan level response: %d/%d", systemConfig.coolingFanLevel, systemConfig.maxCoolingFanLevel);
             } else {
                 ESP_LOGW(TAG, "Invalid cooling fan level response length: %d", currentMessage.dataLength);
             }
@@ -599,13 +609,12 @@ void handleRequestResponse() {
             
         case reqTimeout:        // 0x36
             if (currentMessage.dataLength >= 8) {
-                cachedForceUpTimeout = (currentMessage.data[0] << 8) | currentMessage.data[1];
-                cachedForceOnTimeout = (currentMessage.data[2] << 8) | currentMessage.data[3];
-                cachedForceDownTimeout = (currentMessage.data[4] << 8) | currentMessage.data[5];
-                cachedWaitingTimeout = (currentMessage.data[6] << 8) | currentMessage.data[7];
-                timeoutsValid = true;
-                ESP_LOGI(TAG, "Timeouts updated: ForceUp=%d, ForceOn=%d, ForceDown=%d, Waiting=%d", 
-                         cachedForceUpTimeout, cachedForceOnTimeout, cachedForceDownTimeout, cachedWaitingTimeout);
+                systemConfig.forceUpTimeout = (currentMessage.data[0] << 8) | currentMessage.data[1];
+                systemConfig.forceOnTimeout = (currentMessage.data[2] << 8) | currentMessage.data[3];
+                systemConfig.forceDownTimeout = (currentMessage.data[4] << 8) | currentMessage.data[5];
+                systemConfig.waitingTimeout = (currentMessage.data[6] << 8) | currentMessage.data[7];
+                ESP_LOGI(TAG, "Timeout response: ForceUp=%d, ForceOn=%d, ForceDown=%d, Waiting=%d", 
+                         systemConfig.forceUpTimeout, systemConfig.forceOnTimeout, systemConfig.forceDownTimeout, systemConfig.waitingTimeout);
             } else {
                 ESP_LOGW(TAG, "Invalid timeout response length: %d (expected 8)", currentMessage.dataLength);
             }
@@ -613,9 +622,8 @@ void handleRequestResponse() {
             
         case reqSpk:            // 0x37
             if (currentMessage.dataLength >= 1) {
-                cachedSpeakerVolume = currentMessage.data[0];
-                speakerVolumeValid = true;
-                ESP_LOGI(TAG, "Speaker volume updated: %d", cachedSpeakerVolume);
+                systemConfig.speakerVolume = currentMessage.data[0];
+                ESP_LOGI(TAG, "Speaker volume response: %d", systemConfig.speakerVolume);
             } else {
                 ESP_LOGW(TAG, "Invalid speaker volume response length: %d", currentMessage.dataLength);
             }
@@ -623,11 +631,10 @@ void handleRequestResponse() {
             
         case reqDelay:          // 0x38
             if (currentMessage.dataLength >= 2) {
-                cachedPoseDetectionDelay = currentMessage.data[0];    // 100ms units
-                cachedObjectDetectionDelay = currentMessage.data[1];  // 100ms units
-                detectionDelayValid = true;
-                ESP_LOGI(TAG, "Detection delays updated: Pose=%d00ms, Object=%d00ms", 
-                         cachedPoseDetectionDelay, cachedObjectDetectionDelay);
+                systemConfig.poseDetectionDelay = currentMessage.data[0];    // 100ms units
+                systemConfig.objectDetectionDelay = currentMessage.data[1];  // 100ms units
+                ESP_LOGI(TAG, "Detection delay response: Pose=%d00ms, Object=%d00ms", 
+                         systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay);
             } else {
                 ESP_LOGW(TAG, "Invalid detection delay response length: %d", currentMessage.dataLength);
             }
@@ -641,12 +648,14 @@ void handleRequestResponse() {
 
 void handleControlResponse() {
     // Handle CONTROL command ACKs (0x5X)
-    ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X", currentMessage.command);
+    ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X (%s)", 
+             currentMessage.command, getCommandName(currentMessage.command));
 }
 
-bool sendCommandAsync(uint8_t command, const byte* data = nullptr, size_t dataLen = 0) {
+bool sendCommandAsync(uint8_t command, const byte* data, size_t dataLen) {
     if (waitingForResponse) {
-        ESP_LOGW(TAG, "Cannot send command 0x%02X - already waiting for response", command);
+        ESP_LOGW(TAG, "Cannot send command 0x%02X (%s) - already waiting for response", 
+                 command, getCommandName(command));
         return false;
     }
     
@@ -668,19 +677,20 @@ bool sendCommandAsync(uint8_t command, const byte* data = nullptr, size_t dataLe
     
     // Send the command and return immediately - No waiting!
     if (!sendCommandSafe(command, data, dataLen)) {
-        ESP_LOGE(TAG, "Failed to send command 0x%02X", command);
+        ESP_LOGE(TAG, "Failed to send command 0x%02X (%s)", command, getCommandName(command));
         currentPendingCommand.state = CommandState::ERROR;
         waitingForResponse = false;
         return false;
     }
     
-    ESP_LOGI(TAG, "Command 0x%02X sent asynchronously", command);
+    ESP_LOGI(TAG, "Command 0x%02X (%s) sent asynchronously", command, getCommandName(command));
     return true;
 }
 
 bool sendCommandWithAck(uint8_t command, const byte* data, size_t dataLen, uint32_t timeoutMs) {
     if (waitingForResponse) {
-        ESP_LOGW(TAG, "Cannot send command 0x%02X - already waiting for response", command);
+        ESP_LOGW(TAG, "Cannot send command 0x%02X (%s) - already waiting for response", 
+                 command, getCommandName(command));
         return false;
     }
     
@@ -702,7 +712,7 @@ bool sendCommandWithAck(uint8_t command, const byte* data, size_t dataLen, uint3
     
     // Send the command
     if (!sendCommandSafe(command, data, dataLen)) {
-        ESP_LOGE(TAG, "Failed to send command 0x%02X", command);
+        ESP_LOGE(TAG, "Failed to send command 0x%02X (%s)", command, getCommandName(command));
         currentPendingCommand.state = CommandState::ERROR;
         waitingForResponse = false;
         return false;
@@ -744,12 +754,13 @@ bool waitForResponse(uint8_t expectedCommand, ResponseType responseType, uint32_
         if (currentPendingCommand.command == expectedCommand) {
             if (currentPendingCommand.state == CommandState::ACK_RECEIVED ||
                 currentPendingCommand.state == CommandState::DATA_RECEIVED) {
-                ESP_LOGI(TAG, "Command 0x%02X completed successfully", expectedCommand);
+                ESP_LOGI(TAG, "Command 0x%02X (%s) completed successfully", 
+                         expectedCommand, getCommandName(expectedCommand));
                 return true;
             } else if (currentPendingCommand.state == CommandState::ERROR ||
                        currentPendingCommand.state == CommandState::TIMEOUT) {
-                ESP_LOGW(TAG, "Command 0x%02X completed with error state: %d", 
-                         expectedCommand, static_cast<int>(currentPendingCommand.state));
+                ESP_LOGW(TAG, "Command 0x%02X (%s) completed with error state: %d", 
+                         expectedCommand, getCommandName(expectedCommand), static_cast<int>(currentPendingCommand.state));
                 return false;
             }
         }
@@ -759,7 +770,8 @@ bool waitForResponse(uint8_t expectedCommand, ResponseType responseType, uint32_
     }
     
     // Timeout occurred
-    ESP_LOGW(TAG, "Timeout waiting for response to command 0x%02X", expectedCommand);
+    ESP_LOGW(TAG, "Timeout waiting for response to command 0x%02X (%s)", 
+             expectedCommand, getCommandName(expectedCommand));
     currentPendingCommand.state = CommandState::TIMEOUT;
     waitingForResponse = false;
     return false;
@@ -784,8 +796,8 @@ void processCommandTimeout() {
     uint32_t currentTime = millis();
     if (currentPendingCommand.isTimeoutExpired(currentTime)) {
         uint32_t elapsedTime = currentTime - currentPendingCommand.sentTimestamp;
-        ESP_LOGW(TAG, "Command 0x%02X timed out after %lu ms (attempt %d/%d)", 
-                 currentPendingCommand.command, elapsedTime,
+        ESP_LOGW(TAG, "Command 0x%02X (%s) timed out after %lu ms (attempt %d/%d)", 
+                 currentPendingCommand.command, getCommandName(currentPendingCommand.command), elapsedTime,
                  currentPendingCommand.retryCount + 1, MAX_RETRY_ATTEMPTS + 1);
         
         if (currentPendingCommand.retryCount < MAX_RETRY_ATTEMPTS) {
@@ -798,8 +810,8 @@ void processCommandTimeout() {
                                   REQUEST_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
             nextTimeout += (nextTimeout / 2) * currentPendingCommand.retryCount;  // Exponential backoff
             
-            ESP_LOGI(TAG, "Retrying command 0x%02X (attempt %d/%d, timeout: %lu ms)", 
-                     currentPendingCommand.command, 
+            ESP_LOGI(TAG, "Retrying command 0x%02X (%s) (attempt %d/%d, timeout: %lu ms)", 
+                     currentPendingCommand.command, getCommandName(currentPendingCommand.command),
                      currentPendingCommand.retryCount + 1, 
                      MAX_RETRY_ATTEMPTS + 1,
                      nextTimeout);
@@ -809,15 +821,15 @@ void processCommandTimeout() {
                                    currentPendingCommand.originalData : nullptr;
             
             if (!sendCommandSafe(currentPendingCommand.command, retryData, currentPendingCommand.originalDataLength)) {
-                ESP_LOGE(TAG, "Failed to resend command 0x%02X on retry %d", 
-                         currentPendingCommand.command, currentPendingCommand.retryCount);
+                ESP_LOGE(TAG, "Failed to resend command 0x%02X (%s) on retry %d", 
+                         currentPendingCommand.command, getCommandName(currentPendingCommand.command), currentPendingCommand.retryCount);
                 currentPendingCommand.state = CommandState::ERROR;
                 waitingForResponse = false;
             }
         } else {
             // Max retries exceeded
-            ESP_LOGE(TAG, "Command 0x%02X FAILED after %d attempts (total time: %lu ms)", 
-                     currentPendingCommand.command, MAX_RETRY_ATTEMPTS + 1,
+            ESP_LOGE(TAG, "Command 0x%02X (%s) FAILED after %d attempts (total time: %lu ms)", 
+                     currentPendingCommand.command, getCommandName(currentPendingCommand.command), MAX_RETRY_ATTEMPTS + 1,
                      currentTime - (currentPendingCommand.sentTimestamp - elapsedTime));
             currentPendingCommand.state = CommandState::ERROR;
             waitingForResponse = false;
@@ -883,6 +895,71 @@ uint8_t getCommandRetryCount() {
 }
 
 // =============================================================================
+// Command Name Lookup Function
+// =============================================================================
+
+const char* getCommandName(uint8_t command) {
+    switch (command) {
+        // INIT Commands (0x1X)
+        case initTempSleep:     return "INIT: Sleep Temperature";
+        case initTempWaiting:   return "INIT: Waiting Temperature";
+        case initTempForceUp:   return "INIT: Operating Temperature";
+        case initTempHeatPad:   return "INIT: Heat Pad Temperature";
+        case initPWMCoolFan:    return "INIT: Cooling Fan PWM";
+        case initTout:          return "INIT: Timeout Settings";
+        case initDelay:         return "INIT: Detection Delay";
+        case 0x14:              return "INIT: Upper Temperature Limit";
+        
+        // REQUEST Commands (0x3X)
+        case reqTempSleep:      return "REQUEST: Sleep Temperature";
+        case reqTempWaiting:    return "REQUEST: Waiting Temperature";
+        case reqTempForceUp:    return "REQUEST: Operating Temperature";
+        case reqTempHeatPad:    return "REQUEST: Heat Pad Temperature (DEPRECATED)";
+        case reqUpperTemp:      return "REQUEST: Upper Temperature Limit";
+        case reqPWMCoolFan:     return "REQUEST: Cooling Fan Level";
+        case reqTimeout:        return "REQUEST: Timeout Settings";
+        case reqSpk:            return "REQUEST: Speaker Volume";
+        case reqDelay:          return "REQUEST: Detection Delay";
+        
+        // CONTROL Commands (0x5X)
+        case ctrlReset:         return "CONTROL: Reset Device";
+        case ctrlMode:          return "CONTROL: Set Device Mode";
+        case ctrlSpkVol:        return "CONTROL: Set Speaker Volume";
+        case ctrlFanOn:         return "CONTROL: Set Fan State";
+        case ctrlFanPWM:        return "CONTROL: Set Fan Speed";
+        case ctrlCoolFanOn:     return "CONTROL: Set Cooling Fan State";
+        case ctrlCoolFanPWM:    return "CONTROL: Set Cooling Fan Level";
+        case ctrlHeatPadOn:     return "CONTROL: Set Heat Pad State (DEPRECATED)";
+        case ctrlHeatPadTemp:   return "CONTROL: Set Heat Pad Temperature (DEPRECATED)";
+        case ctrlPose:          return "CONTROL: Set Detection Mode";
+        
+        // STATUS Commands (0x7X)
+        case statMessage:       return "STATUS: Sensor Data";
+        
+        // EVENT Commands (0x8X)
+        case evtInitStart:      return "EVENT: Initialization Started";
+        case evtInitResult:     return "EVENT: Initialization Complete";
+        case evtMode:           return "EVENT: Device Mode Changed";
+        
+        // ERROR Commands (0x9X)
+        case errInit:           return "ERROR: Initialization Failed";
+        
+        default:
+            // Check command type patterns
+            uint8_t cmdType = command & 0xF0;
+            switch (cmdType) {
+                case 0x10: return "INIT: Unknown Command";
+                case 0x30: return "REQUEST: Unknown Command";
+                case 0x50: return "CONTROL: Unknown Command";
+                case 0x70: return "STATUS: Unknown Command";
+                case 0x80: return "EVENT: Unknown Command";
+                case 0x90: return "ERROR: Unknown Command";
+                default:   return "UNKNOWN: Invalid Command";
+            }
+    }
+}
+
+// =============================================================================
 // User-friendly API functions implementation
 // =============================================================================
 
@@ -900,7 +977,8 @@ bool setSleepTemperature(float targetTemp) {
     
     bool success = sendCommandAsync(initTempSleep, data, 2);
     if (success) {
-        ESP_LOGI(TAG, "Sleep temperature set to %.1f°C", targetTemp);
+        ESP_LOGI(TAG, "Sleep temperature set to %.1f°C - Command: 0x%02X (%s)", 
+                 targetTemp, initTempSleep, getCommandName(initTempSleep));
     }
     return success;
 }
@@ -966,7 +1044,8 @@ bool setDeviceMode(DeviceMode mode) {
     bool success = sendCommandAsync(ctrlMode, data, 1);
     if (success) {
         const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
-        ESP_LOGI(TAG, "Device mode set to %s", modeNames[static_cast<int>(mode)]);
+        ESP_LOGI(TAG, "Device mode set to %s - Command: 0x%02X (%s)", 
+                 modeNames[static_cast<int>(mode)], ctrlMode, getCommandName(ctrlMode));
     }
     return success;
 }
@@ -1054,7 +1133,33 @@ bool setSpeakerVolume(uint8_t volume_0_to_10) {
 
 // Sensor data access function
 SensorReading getCurrentSensorData() {
-    return lastSensorReading;
+    SensorReading reading = {};
+    
+    // Copy data from allData to SensorReading structure
+    reading.leftGyro[0] = allData.L_gyro[0];
+    reading.leftGyro[1] = allData.L_gyro[1];
+    reading.leftGyro[2] = allData.L_gyro[2];
+    reading.leftAccel[0] = allData.L_accel[0];
+    reading.leftAccel[1] = allData.L_accel[1];
+    reading.leftAccel[2] = allData.L_accel[2];
+    reading.rightGyro[0] = allData.R_gyro[0];
+    reading.rightGyro[1] = allData.R_gyro[1];
+    reading.rightGyro[2] = allData.R_gyro[2];
+    reading.rightAccel[0] = allData.R_accel[0];
+    reading.rightAccel[1] = allData.R_accel[1];
+    reading.rightAccel[2] = allData.R_accel[2];
+    reading.leftPressure = allData.L_ads;
+    reading.rightPressure = allData.R_ads;
+    reading.outsideTemp = allData.outTemp;
+    reading.boardTemp = allData.boardTemp;
+    reading.actuatorTemp = allData.lmaTemp;
+    reading.actuatorDisplacement = allData.lmaLength;
+    reading.objectDistance = allData.objDistance;
+    reading.batteryVoltage = allData.battery;
+    reading.leftIMUEvent = allData.leftIMUEvent;
+    reading.rightIMUEvent = allData.rightIMUEvent;
+    
+    return reading;
 }
 
 // Pose detection mode setting
@@ -1143,75 +1248,6 @@ bool requestAllParameters() {
     return success;
 }
 
-// =============================================================================
-// Data Validity Check Functions
-// =============================================================================
-
-bool isSleepTemperatureReady() { return sleepTempValid; }
-bool isWaitingTemperatureReady() { return waitingTempValid; }
-bool isOperatingTemperatureReady() { return operatingTempValid; }
-bool isTempLimitReady() { return tempLimitValid; }
-// isHeatPadLevelReady() removed - deprecated functionality
-bool isCoolingFanLevelReady() { return coolingFanLevelValid; }
-bool isSpeakerVolumeReady() { return speakerVolumeValid; }
-bool isDetectionDelayReady() { return detectionDelayValid; }
-
-bool areAllParametersReady() {
-    return sleepTempValid && waitingTempValid && operatingTempValid && 
-           tempLimitValid && coolingFanLevelValid && 
-           speakerVolumeValid && detectionDelayValid;
-}
-
-void clearAllCachedData() {
-    sleepTempValid = false;
-    waitingTempValid = false;
-    operatingTempValid = false;
-    tempLimitValid = false;
-    fanLevelValid = false;
-    coolingFanLevelValid = false;
-    speakerVolumeValid = false;
-    // heatPadLevelValid removed - deprecated functionality
-    timeoutsValid = false;
-    detectionDelayValid = false;
-    ESP_LOGI(TAG, "All cached data cleared");
-}
-
-// =============================================================================
-// Request functions (REQ commands) implementation - Updated for async
-// =============================================================================
-
-float getSleepTemperature() {
-    if (!sleepTempValid) {
-        requestSleepTemperature();  // Async request for fresh data
-        ESP_LOGI(TAG, "Sleep temperature requested, returning cached value");
-    }
-    return cachedSleepTemp;
-}
-
-float getWaitingTemperature() {
-    if (!waitingTempValid) {
-        requestWaitingTemperature();  // Async request for fresh data
-        ESP_LOGI(TAG, "Waiting temperature requested, returning cached value");
-    }
-    return cachedWaitingTemp;
-}
-
-float getOperatingTemperature() {
-    if (!operatingTempValid) {
-        requestOperatingTemperature();  // Async request for fresh data
-        ESP_LOGI(TAG, "Operating temperature requested, returning cached value");
-    }
-    return cachedOperatingTemp;
-}
-
-float getUpperTemperatureLimit() {
-    if (!tempLimitValid) {
-        requestUpperTemperatureLimit();  // Async request for fresh data
-        ESP_LOGI(TAG, "Temperature limit requested, returning cached value");
-    }
-    return cachedTempLimit;
-}
-
 DeviceMode getCurrentMode() {
     // Return the actual tracked device mode updated by event messages
     return currentDeviceMode;
@@ -1223,316 +1259,57 @@ uint8_t getLastErrorCode() {
 }
 
 // =============================================================================
-// Convenience Functions (organized by complexity level)
+// System Configuration Getter Functions
 // =============================================================================
 
-// Default setting values
-namespace DefaultSettings {
-    constexpr float SLEEP_TEMP = 35.0f;
-    constexpr float WAITING_TEMP = 45.0f;
-    constexpr float OPERATING_TEMP = 60.0f;
-    constexpr float UPPER_TEMP_LIMIT = 70.0f;
-    constexpr uint8_t DEFAULT_VOLUME = 5;
-    constexpr uint8_t DEFAULT_FAN_SPEED = 5;
-    constexpr uint8_t DEFAULT_COOLING_FAN_LEVEL = 3;
-    constexpr uint8_t DEFAULT_HEAT_PAD_LEVEL = 5;
+float getSleepTemperature() {
+    return systemConfig.sleepTemp;
 }
 
-// -----------------------------------------------------------------------------
-// Simple Convenience Functions
-// -----------------------------------------------------------------------------
-
-// Print sensor data for debugging
-void printSensorData() {
-    SensorReading data = getCurrentSensorData();
-    
-    ESP_LOGI(TAG, "=== Sensor Data ===");
-    ESP_LOGI(TAG, "Left Gyro: X=%d, Y=%d, Z=%d", data.leftGyro[0], data.leftGyro[1], data.leftGyro[2]);
-    ESP_LOGI(TAG, "Left Accel: X=%d, Y=%d, Z=%d", data.leftAccel[0], data.leftAccel[1], data.leftAccel[2]);
-    ESP_LOGI(TAG, "Right Gyro: X=%d, Y=%d, Z=%d", data.rightGyro[0], data.rightGyro[1], data.rightGyro[2]);
-    ESP_LOGI(TAG, "Right Accel: X=%d, Y=%d, Z=%d", data.rightAccel[0], data.rightAccel[1], data.rightAccel[2]);
-    ESP_LOGI(TAG, "Pressure: L=%d, R=%d", data.leftPressure, data.rightPressure);
-    ESP_LOGI(TAG, "Temperature: Outside=%.1f°C, Board=%.1f°C, Actuator=%.1f°C", 
-             data.getOutsideTemperatureFloat(), 
-             data.getBoardTemperatureFloat(), 
-             data.getActuatorTemperatureFloat());
-    ESP_LOGI(TAG, "Battery: %.2fV", data.getBatteryVoltageFloat());
-    ESP_LOGI(TAG, "IMU Events: L=0x%02X, R=0x%02X", data.leftIMUEvent, data.rightIMUEvent);
+float getWaitingTemperature() {
+    return systemConfig.waitingTemp;
 }
 
-// Turn off all fans
-bool turnOffAllFans() {
-    bool success = true;
-    
-    success &= setFanState(false);
-    vTaskDelay(10 / portTICK_RATE_MS);
-    
-    success &= setCoolingFanState(false);
-    
-    ESP_LOGI(TAG, "All fans turned off");
-    return success;
+float getOperatingTemperature() {
+    return systemConfig.operatingTemp;
 }
 
-// -----------------------------------------------------------------------------
-// Medium Complexity Convenience Functions
-// -----------------------------------------------------------------------------
-
-// Set all temperatures at once
-bool setAllTemperatures(float sleepTemp, float waitingTemp, float operatingTemp, float limitTemp) {
-    bool success = true;
-    
-    success &= setSleepTemperature(sleepTemp);
-    vTaskDelay(50 / portTICK_RATE_MS); // Delay between commands
-    
-    success &= setWaitingTemperature(waitingTemp);
-    vTaskDelay(50 / portTICK_RATE_MS);
-    
-    success &= setOperatingTemperature(operatingTemp);
-    vTaskDelay(50 / portTICK_RATE_MS);
-    
-    success &= setUpperTemperatureLimit(limitTemp);
-    
-    if (success) {
-        ESP_LOGI(TAG, "All temperatures configured successfully");
-    } else {
-        ESP_LOGW(TAG, "Some temperature settings failed");
-    }
-    
-    return success;
+float getUpperTemperatureLimit() {
+    return systemConfig.upperTempLimit;
 }
 
-// Activate safe mode (for emergency use)
-bool activateSafeMode() {
-    ESP_LOGW(TAG, "Activating safe mode...");
-    
-    bool success = true;
-    
-    // Turn off all actuators
-    success &= turnOffAllFans();
-    success &= setHeatPadState(false);
-    
-    // Set to safe temperature
-    success &= setUpperTemperatureLimit(50.0f); // Lower temperature limit
-    
-    // Change to sleep mode
-    success &= setDeviceMode(DeviceMode::SLEEP);
-    
-    if (success) {
-        ESP_LOGI(TAG, "Safe mode activated successfully");
-    } else {
-        ESP_LOGE(TAG, "Failed to activate safe mode");
-    }
-    
-    return success;
+uint8_t getCoolingFanLevel() {
+    return systemConfig.coolingFanLevel;
 }
 
-// Health check function
-bool performHealthCheck() {
-    ESP_LOGI(TAG, "Performing device health check...");
-    
-    SensorReading data = getCurrentSensorData();
-    bool isHealthy = true;
-    
-    // Battery voltage check
-    float batteryVoltage = data.getBatteryVoltageFloat();
-    if (batteryVoltage < 3.0f) { // Example threshold
-        ESP_LOGW(TAG, "Health check: Low battery voltage: %.2fV", batteryVoltage);
-        isHealthy = false;
-    }
-    
-    // Temperature check
-    float boardTemp = data.getBoardTemperatureFloat();
-    if (boardTemp > 80.0f) { // Example threshold
-        ESP_LOGW(TAG, "Health check: High board temperature: %.1f°C", boardTemp);
-        isHealthy = false;
-    }
-    
-    // Actuator temperature check
-    float actuatorTemp = data.getActuatorTemperatureFloat();
-    if (actuatorTemp > DefaultSettings::UPPER_TEMP_LIMIT) {
-        ESP_LOGW(TAG, "Health check: High actuator temperature: %.1f°C", actuatorTemp);
-        isHealthy = false;
-    }
-    
-    if (isHealthy) {
-        ESP_LOGI(TAG, "Health check: All systems normal");
-    } else {
-        ESP_LOGW(TAG, "Health check: Issues detected, consider safe mode");
-    }
-    
-    return isHealthy;
+uint8_t getMaxCoolingFanLevel() {
+    return systemConfig.maxCoolingFanLevel;
 }
 
-// -----------------------------------------------------------------------------
-// Advanced Automation Functions
-// -----------------------------------------------------------------------------
-
-bool initializeWithDefaults() {
-    ESP_LOGI(TAG, "Initializing device with default settings...");
-    
-    bool success = true;
-    
-    // Default temperature settings
-    success &= setAllTemperatures(
-        DefaultSettings::SLEEP_TEMP,
-        DefaultSettings::WAITING_TEMP, 
-        DefaultSettings::OPERATING_TEMP,
-        DefaultSettings::UPPER_TEMP_LIMIT
-    );
-    
-    vTaskDelay(100 / portTICK_RATE_MS);
-    
-    // Default volume setting
-    success &= setSpeakerVolume(DefaultSettings::DEFAULT_VOLUME);
-    vTaskDelay(50 / portTICK_RATE_MS);
-    
-    // Initial state for fans and heat pad (all OFF)
-    success &= turnOffAllFans();
-    vTaskDelay(50 / portTICK_RATE_MS);
-    
-    success &= setHeatPadState(false);
-    vTaskDelay(50 / portTICK_RATE_MS);
-    
-    // Set to pose detection mode
-    setPoseDetectionMode(true);
-    
-    if (success) {
-        ESP_LOGI(TAG, "Device initialized with defaults successfully");
-    } else {
-        ESP_LOGW(TAG, "Some default settings failed to apply");
-    }
-    
-    return success;
+uint8_t getSpeakerVolume() {
+    return systemConfig.speakerVolume;
 }
 
-// Automated communication error recovery
-bool recoverFromError() {
-    ESP_LOGW(TAG, "Attempting error recovery...");
-    
-    // Reset parser state
-    resetParser();
-    
-    // Clear serial buffer
-    while (STMSerial.available()) {
-        STMSerial.read();
-    }
-    
-    // Attempt device reset after brief delay
-    vTaskDelay(100 / portTICK_RATE_MS);
-    
-    bool resetSuccess = resetDevice();
-    if (resetSuccess) {
-        ESP_LOGI(TAG, "Error recovery: Device reset successful");
-        
-        // Wait briefly after reset
-        vTaskDelay(500 / portTICK_RATE_MS);
-        
-        // Re-initialize with default settings
-        return initializeWithDefaults();
-    } else {
-        ESP_LOGE(TAG, "Error recovery: Device reset failed");
-        return false;
-    }
+uint16_t getForceUpTimeout() {
+    return systemConfig.forceUpTimeout;
 }
 
-
-// =============================================================================
-// Enhanced Error Recovery and Diagnostics
-// =============================================================================
-
-bool performCommunicationTest() {
-    ESP_LOGI(TAG, "Starting communication test with STM...");
-    
-    // Test 1: Try to get current device mode (simple request)
-    DeviceMode mode = getCurrentMode();
-    ESP_LOGI(TAG, "Communication test - Current mode: %d", static_cast<int>(mode));
-    
-    // Test 2: Try to set speaker volume (simple command with ACK)
-    uint8_t originalVolume = 5;
-    if (!setSpeakerVolume(originalVolume)) {
-        ESP_LOGE(TAG, "Communication test FAILED - Cannot set speaker volume");
-        return false;
-    }
-    
-    // Test 3: Try to get temperature configuration (REQUEST with data response)
-    TemperatureConfig config = getSleepTemperature();
-    if (config.targetTemp == 35.0f && config.maxTemp == 70.0f) {
-        ESP_LOGW(TAG, "Communication test WARNING - Got default values, may indicate communication issue");
-    }
-    
-    // Test 4: Check if there are any pending commands or errors
-    if (isCommandInProgress()) {
-        ESP_LOGW(TAG, "Communication test WARNING - Command still in progress");
-        return false;
-    }
-    
-    if (getLastErrorCode() != 0) {
-        ESP_LOGW(TAG, "Communication test WARNING - Last error code: %d (%s)", 
-                 getLastErrorCode(), getLastErrorString());
-    }
-    
-    ESP_LOGI(TAG, "Communication test PASSED");
-    return true;
+uint16_t getForceOnTimeout() {
+    return systemConfig.forceOnTimeout;
 }
 
-void printSystemStatus() {
-    ESP_LOGI(TAG, "=== System Status Report ===");
-    
-    // Communication status
-    ESP_LOGI(TAG, "Communication Status:");
-    ESP_LOGI(TAG, "  - Command in progress: %s", isCommandInProgress() ? "YES" : "NO");
-    ESP_LOGI(TAG, "  - Waiting for response: %s", isResponseExpected() ? "YES" : "NO");
-    ESP_LOGI(TAG, "  - Last error: %s", getLastErrorString());
-    ESP_LOGI(TAG, "  - Last error code: %d", getLastErrorCode());
-    
-    if (isCommandInProgress()) {
-        ESP_LOGI(TAG, "  - Current command: 0x%02X", currentPendingCommand.command);
-        ESP_LOGI(TAG, "  - Command state: %s", getCommandStateString(currentPendingCommand.state));
-        ESP_LOGI(TAG, "  - Retry count: %d/%d", getCommandRetryCount(), MAX_RETRY_ATTEMPTS);
-        ESP_LOGI(TAG, "  - Time since sent: %lu ms", millis() - getLastCommandTimestamp());
-    }
-    
-    // Device status
-    ESP_LOGI(TAG, "Device Status:");
-    DeviceMode mode = getCurrentMode();
-    const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
-    ESP_LOGI(TAG, "  - Current mode: %s (%d)", modeNames[static_cast<int>(mode)], static_cast<int>(mode));
-    ESP_LOGI(TAG, "  - Sensor data available: %s", sensorDataAvailable ? "YES" : "NO");
-    
-    // Sensor status (if available)
-    if (sensorDataAvailable) {
-        SensorReading data = getCurrentSensorData();
-        ESP_LOGI(TAG, "Sensor Status:");
-        ESP_LOGI(TAG, "  - Outside temperature: %.1f°C", data.getOutsideTemperatureFloat());
-        ESP_LOGI(TAG, "  - Board temperature: %.1f°C", data.getBoardTemperatureFloat());
-        ESP_LOGI(TAG, "  - Actuator temperature: %.1f°C", data.getActuatorTemperatureFloat());
-        ESP_LOGI(TAG, "  - Battery voltage: %.2fV", data.getBatteryVoltageFloat());
-        ESP_LOGI(TAG, "  - Left/Right pressure: %d/%d", data.leftPressure, data.rightPressure);
-    }
-    
-    ESP_LOGI(TAG, "=== End Status Report ===");
+uint16_t getForceDownTimeout() {
+    return systemConfig.forceDownTimeout;
 }
 
-bool emergencyShutdown() {
-    ESP_LOGW(TAG, "EMERGENCY SHUTDOWN INITIATED");
-    
-    bool success = true;
-    
-    // Stop all actuators
-    success &= turnOffAllFans();
-    // success &= setHeatPadState(false);
-    
-    // Set device to safe mode (SLEEP)
-    success &= setDeviceMode(DeviceMode::SLEEP);
-    
-    // Clear any pending commands
-    clearPendingCommand();
-    
-    if (success) {
-        ESP_LOGI(TAG, "Emergency shutdown completed successfully");
-    } else {
-        ESP_LOGE(TAG, "Emergency shutdown completed with errors");
-    }
-    
-    return success;
+uint16_t getWaitingTimeout() {
+    return systemConfig.waitingTimeout;
+}
+
+uint8_t getPoseDetectionDelay() {
+    return systemConfig.poseDetectionDelay;
+}
+
+uint8_t getObjectDetectionDelay() {
+    return systemConfig.objectDetectionDelay;
 }

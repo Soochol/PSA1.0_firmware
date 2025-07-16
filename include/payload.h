@@ -43,23 +43,8 @@ class PayloadConvert {
 
 // uint8_t add_gaussian_noise(uint8_t original_value, float std_dev);  // Removed - not implemented
 
-// Use unified buffer size from globals.h
-// #define USART_MESSAGE_MAXIMUM_SIZE 256  // Removed - use USART_MESSAGE_MAXIMUM_LENGTH from globals.h
-class usartMessage {
-    public:
-        usartMessage();
-        ~usartMessage();
-        void initialize();
-        void appendByte(byte value);
-        void reset(void);
-
-        const char* getBuffer() const { return buffer; } // To get the pointer to the message data
-        size_t getCurrentSize() const { return bufferIndex; } // To get the current length of the message
-
-    private:
-        char *buffer;
-        size_t bufferIndex;
-};
+// usartMessage class moved to uartMaster.h and replaced with stack-based implementation
+// This improves memory efficiency by eliminating dynamic allocation
 
 
 

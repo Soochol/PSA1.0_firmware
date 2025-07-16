@@ -34,7 +34,6 @@
  */
 #define EXT_ANT_ON 0
 
-#define DebugSerial Serial
 #define PWR_PIN 5
 #define RST_PIN 18
 #define WAKEUP_PIN 19

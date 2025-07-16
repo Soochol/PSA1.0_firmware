@@ -2,8 +2,8 @@
 
 static const char TAG[] = __FILE__;
 
-HardwareSerial M1Serial(1); // use ESP32 UART2
-TYPE1SC TYPE1SC(M1Serial, DebugSerial, PWR_PIN, RST_PIN, WAKEUP_PIN);
+// LTESerial now uses the Serial1 defined in Arduino framework
+TYPE1SC TYPE1SC(LTESerial, DebugSerial, PWR_PIN, RST_PIN, WAKEUP_PIN);
 
 void (*userCallback)(const char* response) = NULL;
 
@@ -14,8 +14,8 @@ void registerModemCallback(void (*callback)(const char*)) {
 void modemTask(void* parameter) {
     String buffer = "";
     while (1) {
-        if (M1Serial.available()) {
-            char c = M1Serial.read();
+        if (LTESerial.available()) {
+            char c = LTESerial.read();
             buffer += c;
 
             if (c == '\n') {  // End of AT response line
@@ -33,7 +33,7 @@ void modemTask(void* parameter) {
 }
 
 void myATResponseHandler(const char* response) {
-    Serial.printf("[Modem] Response: %s\n", response);
+    DebugSerial.printf("[Modem] Response: %s\n", response);
     if (strstr(response, "+QMTRECV:")) {
         // Handle MQTT message
     }
@@ -50,9 +50,9 @@ void extAntenna() {
 
 void setSerials() {
 
-    /* Serial2 Initialization */
-    M1Serial.begin(115200, SERIAL_8N1, ESP_U1_RXD, ESP_U1_TXD); // RXD2 : 16, TXD2 : 17
-    DebugSerial.begin(115200);
+    /* LTE Serial Initialization */
+    LTESerial.begin(115200, SERIAL_8N1, ESP_U1_RXD, ESP_U1_TXD); // RXD1 : 18, TXD1 : 17
+    // DebugSerial.begin(115200); // Already initialized in main.cpp
 
     DebugSerial.println("\tTYPE1SC Module Start!!!");
 }

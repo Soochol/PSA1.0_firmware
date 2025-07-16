@@ -184,12 +184,7 @@ struct SensorReading {
     // IMU events
     uint8_t leftIMUEvent;
     uint8_t rightIMUEvent;
-    
-    // Convenience functions
-    float getOutsideTemperatureFloat() const { return outsideTemp / 100.0f; }
-    float getBoardTemperatureFloat() const { return boardTemp / 100.0f; }
-    float getActuatorTemperatureFloat() const { return actuatorTemp / 100.0f; }
-    float getBatteryVoltageFloat() const { return batteryVoltage / 100.0f; }
+
 };
 
 // Structure for message parsing
@@ -271,23 +266,20 @@ bool requestSpeakerVolume();
 bool requestDetectionDelay();
 bool requestAllParameters();
 
-// Data validity check functions
-bool isSleepTemperatureReady();
-bool isWaitingTemperatureReady();
-bool isOperatingTemperatureReady();
-bool isTempLimitReady();
-// bool isHeatPadLevelReady(); // DEPRECATED
-bool isCoolingFanLevelReady();
-bool isSpeakerVolumeReady();
-bool isDetectionDelayReady();
-bool areAllParametersReady();
-void clearAllCachedData();
-
-// Request functions (Updated for async)
+// System configuration getter functions
 float getSleepTemperature();
 float getWaitingTemperature();
 float getOperatingTemperature();
 float getUpperTemperatureLimit();
+uint8_t getCoolingFanLevel();
+uint8_t getMaxCoolingFanLevel();
+uint8_t getSpeakerVolume();
+uint16_t getForceUpTimeout();
+uint16_t getForceOnTimeout();
+uint16_t getForceDownTimeout();
+uint16_t getWaitingTimeout();
+uint8_t getPoseDetectionDelay();
+uint8_t getObjectDetectionDelay();
 
 // Utility functions
 bool resetDevice();
@@ -295,20 +287,12 @@ bool isPoseDetectionMode();
 bool isObjectDetectionMode();
 bool setPoseDetectionMode(bool enabled);
 
-// Convenience functions
-bool setAllTemperatures(float sleepTemp, float waitingTemp, float operatingTemp, float limitTemp);
-bool turnOffAllFans();
-void printSensorData();
+// Command name lookup function
+const char* getCommandName(uint8_t command);
 
-// Advanced convenience functions - default settings and automation
-bool initializeWithDefaults();
-bool recoverFromError();
-bool activateSafeMode();
-bool performHealthCheck();
-
-// Enhanced error recovery and diagnostics
-bool performCommunicationTest();
-void printSystemStatus();
-bool emergencyShutdown();
+bool sendCommandSafe(byte command, const byte* data = nullptr, size_t dataLen = 0);
+size_t buildMessage(uint8_t* buffer, byte command, const byte* data = nullptr, size_t dataLen = 0);
+void resetParser();
+void parseSensorData(const uint8_t* data, size_t length);
 
 #endif

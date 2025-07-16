@@ -15,16 +15,18 @@ float negative3[270] = { -1.9703, 0.4221, 0.8061, -0.4066, 0.5887, -0.8795, 0.83
 void predictSample(const char *classLabel, float *input, uint8_t expectedOutput) {
     // classify class 0
     if (!tf.predict(input).isOk()) {
-        Serial.println(tf.exception.toString());
+        extern HardwareSerial DebugSerial;
+        DebugSerial.println(tf.exception.toString());
         return;
     }
 
-    Serial.print("Predicting sample of ");
-    Serial.print(classLabel);
-    Serial.print(": expcted id=");
-    Serial.print(expectedOutput);
-    Serial.print(", predicted=");
-    Serial.println(tf.classification);
+    extern HardwareSerial DebugSerial;
+    DebugSerial.print("Predicting sample of ");
+    DebugSerial.print(classLabel);
+    DebugSerial.print(": expcted id=");
+    DebugSerial.print(expectedOutput);
+    DebugSerial.print(", predicted=");
+    DebugSerial.println(tf.classification);
 
 }
 
@@ -38,9 +40,9 @@ void tinyMLExample() {
     predictSample("negative3", negative3, 0);
 
     // how long does it take to run a single prediction?
-    Serial.print("It takes ");
-    Serial.print(tf.benchmark.microseconds());
-    Serial.println("us for a single prediction");
+    DebugSerial.print("It takes ");
+    DebugSerial.print(tf.benchmark.microseconds());
+    DebugSerial.println("us for a single prediction");
 
     delay(1000);
 }
@@ -49,21 +51,21 @@ void tinyMLExample() {
 void initTinyML() {
     // Serial.begin(115200);
     // delay(3000);
-    Serial.println("__TENSORFLOW__");
+    DebugSerial.println("__TENSORFLOW__");
 
     // configure input/output
     // (not mandatory if you generated the .h model
     // using the eloquent_tensorflow Python package)
     tf.setNumInputs(TF_NUM_INPUTS);
-    Serial.println("__INPUTS SET__");
+    DebugSerial.println("__INPUTS SET__");
     tf.setNumOutputs(TF_NUM_OUTPUTS);
-    Serial.println("__OUTPUTS SET__");
+    DebugSerial.println("__OUTPUTS SET__");
 
     registerNetworkOps(tf);
-    Serial.println("__NETWORKOPS SET__");
+    DebugSerial.println("__NETWORKOPS SET__");
 
     while (!tf.begin(tfModel).isOk()) {
-        Serial.println(tf.exception.toString());
+        DebugSerial.println(tf.exception.toString());
         delay(1000);
     }
 
@@ -164,21 +166,24 @@ uint8_t tinyMLInference(tinyMLDataClass predictionInput) {
 #endif
 
 #ifdef PRINT_PREDICTION_DATA
-    Serial.println("------");
+    extern HardwareSerial DebugSerial;
+    DebugSerial.println("------");
     for (int j=0; j<TINYML_BUFFER_LEN*9; j++) {
-        Serial.printf("%f, ", flattenedInput[j]);
+        DebugSerial.printf("%f, ", flattenedInput[j]);
     }
-    Serial.println("------");
+    DebugSerial.println("------");
 #endif
 
     if (!tf.predict(flattenedInput).isOk()) {
-        Serial.printf("SOMETHING WRONG WITH MODEL INFERENCE");
-        Serial.println(tf.exception.toString());
+        extern HardwareSerial DebugSerial;
+        DebugSerial.printf("SOMETHING WRONG WITH MODEL INFERENCE");
+        DebugSerial.println(tf.exception.toString());
         return 0;
     }
     prediction = tf.classification;
-    Serial.print("predicted=");
-    Serial.println(tf.classification);
+    extern HardwareSerial DebugSerial;
+    DebugSerial.print("predicted=");
+    DebugSerial.println(tf.classification);
 
     return prediction;
 }

@@ -11,6 +11,8 @@
 #ifndef _GLOBALS_H
 #define _GLOBALS_H
 
+#include <Arduino.h>  // For HardwareSerial
+
 // release version---------------------
 #define RELEASE_MODE
 #define DEV_MODE
@@ -42,6 +44,9 @@
 
 // #define SENSORS_STM_CONNECTED
 
+// UART configuration flags
+// #define STM_HARDWARE_CONNECTED    // STM 하드웨어 연결 여부 (주석 처리하면 STM 없는 모드)
+
 /*
    MEMORY KEEPING
 */
@@ -69,6 +74,17 @@
 // STM SERIAL
 #define ESP_U2_RXD      16
 #define ESP_U2_TXD      15
+
+// Hardware-specific serial port definitions
+#define STMSerial Serial2       // UART2 → STM communication
+#define LTESerial Serial1       // UART1 → LTE modem (uses Arduino framework Serial1)
+
+// Conditional debug serial mapping based on STM hardware presence
+#ifdef STM_HARDWARE_CONNECTED
+    #define DebugSerial Serial      // STM mode: Debug via USB (UART0)
+#else
+    #define DebugSerial Serial2     // Python mode: Debug via UART2
+#endif
 
 // ESP HEATER
 #define PWM_ESP_HEATER  8
@@ -348,8 +364,29 @@ typedef struct {
     int16_t torsoAngleMin = 0;
     
     uint8_t tilt_count = 0;
+    
+    uint8_t leftIMUEvent = 0;
+    uint8_t rightIMUEvent = 0;
 
 } allData_t;
+
+
+
+typedef struct {
+    float sleepTemp;
+    float waitingTemp; 
+    float operatingTemp;
+    float upperTempLimit;
+    uint8_t coolingFanLevel;
+    uint8_t maxCoolingFanLevel;
+    uint8_t speakerVolume;
+    uint16_t forceUpTimeout;
+    uint16_t forceOnTimeout;
+    uint16_t forceDownTimeout;
+    uint16_t waitingTimeout;
+    uint8_t poseDetectionDelay;
+    uint8_t objectDetectionDelay;
+} SystemConfig_t;
 
 class biosigDataClass {
     public:
@@ -443,6 +480,7 @@ extern SemaphoreHandle_t processBiosignalsSemaphore;
 
 
 extern allData_t allData;
+extern SystemConfig_t systemConfig;
 extern tinyMLDataClass predictionInput;
 extern biosigDataClass biosigData1Min;
 

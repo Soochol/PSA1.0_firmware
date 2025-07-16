@@ -195,7 +195,7 @@ uint16_t tinyMLDataClass::addData(allData_t allData) {
 
     tofBuffer[index] = allData.lmaLength;
 
-    Serial.printf("%d, %d, %d, %d, %d, %d, %d, %d, %d\n", adsRBuffer[index], gyroRXBuffer[index], gyroRYBuffer[index], gyroRZBuffer[index], adsLBuffer[index], gyroLXBuffer[index], gyroLYBuffer[index], gyroLZBuffer[index], tofBuffer[index]);
+    DebugSerial.printf("%d, %d, %d, %d, %d, %d, %d, %d, %d\n", adsRBuffer[index], gyroRXBuffer[index], gyroRYBuffer[index], gyroRZBuffer[index], adsLBuffer[index], gyroLXBuffer[index], gyroLYBuffer[index], gyroLZBuffer[index], tofBuffer[index]);
     index += 1;
 
     return index;
@@ -217,13 +217,13 @@ bool tinyMLDataClass::calculateTofSlope(int16_t threshold, int duration) {
     int16_t slope = 0;
     for (int i = TINYML_BUFFER_LEN-1-duration; i < TINYML_BUFFER_LEN-1; i++) {
         slope += tofBuffer[i+1]-tofBuffer[i];
-        Serial.printf("d_i+1 - d_i: %d\n", tofBuffer[i+1]-tofBuffer[i]);
+        DebugSerial.printf("d_i+1 - d_i: %d\n", tofBuffer[i+1]-tofBuffer[i]);
     }
     slope /= duration;
     if (slope >= threshold) {
         prediction = true;
     }
-    Serial.printf("slope: %d\n", slope);
+    DebugSerial.printf("slope: %d\n", slope);
 
     return prediction;
 }
