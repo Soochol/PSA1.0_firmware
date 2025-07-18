@@ -11,7 +11,7 @@ void makeThingName() {
     esp_read_mac(macBle, ESP_MAC_BT);
     sprintf(cfg->thing_name, "WFPSA%02X%02X%02X%02X%02X%02X%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], macBle[5]);
-    DebugSerial.printf("\n\ndevice id: %s\n", cfg->thing_name);
+    ESP_LOGI(TAG, "\n\ndevice id: %s", cfg->thing_name);
 }
 
 void setEndpoints(configData_t *configData) {

@@ -2,8 +2,7 @@
 
 static const char TAG[] = __FILE__;
 
-// LTESerial now uses the Serial1 defined in Arduino framework
-TYPE1SC TYPE1SC(LTESerial, DebugSerial, PWR_PIN, RST_PIN, WAKEUP_PIN);
+TYPE1SC TYPE1SC(LTESerial, Serial, PWR_PIN, RST_PIN, WAKEUP_PIN);
 
 void (*userCallback)(const char* response) = NULL;
 
@@ -22,9 +21,6 @@ void modemTask(void* parameter) {
                 if (userCallback != NULL) {
                     userCallback(buffer.c_str());
                 }
-                // DebugSerial.println("-------------------------");
-                // DebugSerial.println(buffer);
-                // DebugSerial.println("-------------------------");
                 buffer = "";
             }
         }
@@ -33,7 +29,7 @@ void modemTask(void* parameter) {
 }
 
 void myATResponseHandler(const char* response) {
-    DebugSerial.printf("[Modem] Response: %s\n", response);
+    ESP_LOGI(TAG, "[Modem] Response: %s", response);
     if (strstr(response, "+QMTRECV:")) {
         // Handle MQTT message
     }
@@ -52,16 +48,15 @@ void setSerials() {
 
     /* LTE Serial Initialization */
     LTESerial.begin(115200, SERIAL_8N1, ESP_U1_RXD, ESP_U1_TXD); // RXD1 : 18, TXD1 : 17
-    // DebugSerial.begin(115200); // Already initialized in main.cpp
 
-    DebugSerial.println("\tTYPE1SC Module Start!!!");
+    ESP_LOGI(TAG, "\tTYPE1SC Module Start!!!");
 }
 
 void publishTask(void *pvParameters) {
     while (1) {
         // Wait for a signal that a report is ready to be sent
         if (xSemaphoreTake(reportReadySemaphore, portMAX_DELAY) == pdTRUE) {
-            DebugSerial.println("---publishTask initiating---");
+            ESP_LOGI(TAG, "---publishTask initiating---");
             ESP_LOGI(TAG, "Publisher task received signal to send report.");
             unsigned long start_report = millis();
 
@@ -72,7 +67,7 @@ void publishTask(void *pvParameters) {
                 ESP_LOGI(TAG, "6.Something went wrong");
             }
             ESP_LOGI(TAG, "type1scReport() completed in %lu ms", millis() - start_report);
-            DebugSerial.println("---publishTask finished---");
+            ESP_LOGI(TAG, "---publishTask finished---");
         }
     }
 }
@@ -87,26 +82,26 @@ void initType1sc() {
 
     /* TYPE1SC Module Initialization */
     if (TYPE1SC.init()) {
-        DebugSerial.println("\tTYPE1SC Module Error!!!");
+        ESP_LOGI(TAG, "\tTYPE1SC Module Error!!!");
     }
 
     /* Network Registration Check */
     while (TYPE1SC.canConnect() != 0) {
-        DebugSerial.println("\tNetwork not Ready!!!");
+        ESP_LOGI(TAG, "\tNetwork not Ready!!!");
         delay(2000);
     }
 
-    DebugSerial.println("\tTYPE1SC Module Ready!!!");
+    ESP_LOGI(TAG, "\tTYPE1SC Module Ready!!!");
 
     /*** TYPE1SC Basic Test Code ***/
     /* SIM Card Check */
     if (!TYPE1SC.chkSIM()) {
-        DebugSerial.println("\tSIM Card OK!!!");
+        ESP_LOGI(TAG, "\tSIM Card OK!!!");
     }
     delay(1000);
 
     xTaskCreate(publishTask, "publishTask", PUBLISH_TASK_STACK, NULL, PUBLISH_TASK_PRI, &TaskPublish_h);
-    DebugSerial.println("\tTYPE1SC initialized...");
+    ESP_LOGI(TAG, "\tTYPE1SC initialized...");
     
 }
 
@@ -114,18 +109,17 @@ void type1scSetAPN() {
     char *apnAddr = "simplio.apn"; /* Vodafone Global IoT SIM APN */
 
     if (TYPE1SC.setAPN(apnAddr) == 0) {
-        DebugSerial.println("\tTYPE1SC Set APN Address!!!");
+        ESP_LOGI(TAG, "\tTYPE1SC Set APN Address!!!");
     }
     delay(1000);
 
 
     char apn[128];
     if (TYPE1SC.getAPN(apn, sizeof(apn)) == 0) {
-        DebugSerial.print("\tGET APN Address: ");
-        DebugSerial.println(apn);
+        ESP_LOGI(TAG, "\tGET APN Address: %s", apn);
     }
 
-    DebugSerial.println("\tTYPE1SC APN Setup Complete!!!");
+    ESP_LOGI(TAG, "\tTYPE1SC APN Setup Complete!!!");
 }
 
 void type1scSetCertificates() {
@@ -133,32 +127,32 @@ void type1scSetCertificates() {
     /* DELETE Certification Profile 1-255 */
     int delProfile = 9;
     if (TYPE1SC.delCert(delProfile) == 0) {
-        DebugSerial.println("\tDelete Certification Profile!!!");
+        ESP_LOGI(TAG, "\tDelete Certification Profile!!!");
     }
     delay(2000);
 
     /* Write root CA, Don't edit the file name */
     if (TYPE1SC.writeKEY("rootCA.pem", 0, rootCA) == 0) {
-        DebugSerial.println("\tRoot CA Write!!!");
+        ESP_LOGI(TAG, "\tRoot CA Write!!!");
     }
     delay(2000);
 
     /* Write client CA, Don't edit the file name */
     if (TYPE1SC.writeKEY("cert.pem.crt", 0, clientCrt) == 0) {
-        DebugSerial.println("\tClient CA Write!!!");
+        ESP_LOGI(TAG, "\tClient CA Write!!!");
     }
     delay(2000);
 
     /* Write client KEY, Don't edit the file name */
     if (TYPE1SC.writeKEY("private.pem.key", 1, clientKey) == 0) {
-        DebugSerial.println("\tClient KEY Write!!!");
+        ESP_LOGI(TAG, "\tClient KEY Write!!!");
     }
     delay(2000);
 
     /* ADD Certification Profile 1-255 */
     int addProfile = 9;
     if (TYPE1SC.addCert(addProfile) == 0) {
-        DebugSerial.println("\tADD Certification Profile!!!");
+        ESP_LOGI(TAG, "\tADD Certification Profile!!!");
     }
     delay(2000);
 }
@@ -167,32 +161,28 @@ void type1scPrintStrength() {
     /* Get RSSI */
     int rssi;
     if (TYPE1SC.getRSSI(&rssi) == 0) {
-        DebugSerial.print("\tRSSI : ");
-        DebugSerial.println(rssi);
+        ESP_LOGI(TAG, "\tRSSI : %d", rssi);
     }
     delay(100);
 
     /* Get RSRP */
     int rsrp;
     if (TYPE1SC.getRSRP(&rsrp) == 0) {
-        DebugSerial.print("\tRSRP : ");
-        DebugSerial.println(rsrp);
+        ESP_LOGI(TAG, "\tRSRP : %d", rsrp);
     }
     delay(100);
 
     /* Get RSRQ */
     int rsrq;
     if (TYPE1SC.getRSRQ(&rsrq) == 0) {
-        DebugSerial.print("\tRSRQ : ");
-        DebugSerial.println(rsrq);
+        ESP_LOGI(TAG, "\tRSRQ : %d", rsrq);
     }
     delay(100);
 
     /* Get SINR */
     int sinr;
     if (TYPE1SC.getSINR(&sinr) == 0) {
-        DebugSerial.print("\tSINR : ");
-        DebugSerial.println(sinr);
+        ESP_LOGI(TAG, "\tSINR : %d", sinr);
     }
     delay(100);
 }
@@ -201,80 +191,70 @@ void type1scBasicTest() {
     /* Get Phone Number */
     char szCIMI[32];
     if (TYPE1SC.getCIMI(szCIMI, sizeof(szCIMI)) == 0) {
-        DebugSerial.print("\tIMSI : ");
-        DebugSerial.println(szCIMI);
+        ESP_LOGI(TAG, "\tIMSI : %s", szCIMI);
     }
     delay(1000);
 
     /* Get IMEI Number */
     char szIMEI[32];
     if (TYPE1SC.getIMEI(szIMEI, sizeof(szIMEI)) == 0) {
-        DebugSerial.print("\tIMEI : ");
-        DebugSerial.println(szIMEI);
+        ESP_LOGI(TAG, "\tIMEI : %s", szIMEI);
     }
     delay(1000);
 
     /* Get ICCID Number */
     char szICCID[32];
     if (TYPE1SC.getICCID(szICCID, sizeof(szICCID)) == 0) {
-        DebugSerial.print("\tICCID : ");
-        DebugSerial.println(szICCID);
+        ESP_LOGI(TAG, "\tICCID : %s", szICCID);
     }
     delay(1000);
 
     /* Get Fimrware version */
     char szCGMR[32];
     if (TYPE1SC.getCGMR(szCGMR, sizeof(szCGMR)) == 0) {
-        DebugSerial.print("\tCGMR : ");
-        DebugSerial.println(szCGMR);
+        ESP_LOGI(TAG, "\tCGMR : %s", szCGMR);
     }
     delay(1000);
 
     /* Get Time (GMT, (+36/4) ==> Korea +9hour) */
     char szTime[32];
     if (TYPE1SC.getCCLK(szTime, sizeof(szTime)) == 0) {
-        DebugSerial.print("\tTime : ");
-        DebugSerial.println(szTime);
+        ESP_LOGI(TAG, "\tTime : %s", szTime);
     }
     delay(1000);
 
     /* Get RSSI */
     int rssi;
     if (TYPE1SC.getRSSI(&rssi) == 0) {
-        DebugSerial.print("\tRSSI : ");
-        DebugSerial.println(rssi);
+        ESP_LOGI(TAG, "\tRSSI : %d", rssi);
     }
     delay(1000);
 
     /* Get RSRP */
     int rsrp;
     if (TYPE1SC.getRSRP(&rsrp) == 0) {
-        DebugSerial.print("\tRSRP : ");
-        DebugSerial.println(rsrp);
+        ESP_LOGI(TAG, "\tRSRP : %d", rsrp);
     }
     delay(1000);
 
     /* Get RSRQ */
     int rsrq;
     if (TYPE1SC.getRSRQ(&rsrq) == 0) {
-        DebugSerial.print("\tRSRQ : ");
-        DebugSerial.println(rsrq);
+        ESP_LOGI(TAG, "\tRSRQ : %d", rsrq);
     }
     delay(1000);
 
     /* Get SINR */
     int sinr;
     if (TYPE1SC.getSINR(&sinr) == 0) {
-        DebugSerial.print("\tSINR : ");
-        DebugSerial.println(sinr);
+        ESP_LOGI(TAG, "\tSINR : %d", sinr);
     }
     delay(1000);
 
     /* Get TX Power */
     char txPower[64];
     if (TYPE1SC.getTxPower(txPower, sizeof(txPower)) == 0) {
-        DebugSerial.print("\tTX Power : ");
-        DebugSerial.println(txPower);
+        ESP_LOGI(TAG, "\tTX Power : %s", txPower);
     }
     delay(1000);
 }
@@ -286,11 +266,10 @@ void type1scHttpTest() {
     while (1) {
 
         if (TYPE1SC.getIPAddr("api.thingspeak.com", IPAddr, sizeof(IPAddr)) == 0) {
-        DebugSerial.print("IP Address : ");
-        DebugSerial.println(IPAddr);
+        ESP_LOGI(TAG, "IP Address : %s", IPAddr);
         break;
         } else {
-        DebugSerial.println("IP Address Error!!!");
+        ESP_LOGI(TAG, "IP Address Error!!!");
         }
         delay(2000);
     }
@@ -314,24 +293,23 @@ void type1scHttpTest() {
         if (String(temp) != "nan" && String(humi) != "nan")
         break;
         else {
-        DebugSerial.println("case nan ...");
+        ESP_LOGI(TAG, "case nan ...");
         delay(1000);
         }
     }
 
     /* 1 :TCP Socket Create ( 0:UDP, 1:TCP ) */
     if (TYPE1SC.socketCreate(1, IPAddr, _PORT) == 0)
-        DebugSerial.println("TCP Socket Create!!!");
+        ESP_LOGI(TAG, "TCP Socket Create!!!");
 
     INFO:
 
     /* 2 :TCP Socket Activation */
     if (TYPE1SC.socketActivate() == 0)
-        DebugSerial.println("TCP Socket Activation!!!");
+        ESP_LOGI(TAG, "TCP Socket Activation!!!");
 
     if (TYPE1SC.socketInfo(sckInfo, sizeof(sckInfo)) == 0) {
-        DebugSerial.print("Socket Info : ");
-        DebugSerial.println(sckInfo);
+        ESP_LOGI(TAG, "Socket Info : %s", sckInfo);
 
         if (strcmp(sckInfo, "ACTIVATED")) {
         delay(3000);
@@ -348,33 +326,29 @@ void type1scHttpTest() {
     data += "Connection: close\r\n\r\n";
 
     if (TYPE1SC.socketSend(data.c_str()) == 0) {
-        DebugSerial.print("[HTTP Send] >>  ");
-        DebugSerial.println(data);
+        ESP_LOGI(TAG, "[HTTP Send] >>  %s", data.c_str());
     } else
-        DebugSerial.println("Send Fail!!!");
+        ESP_LOGI(TAG, "Send Fail!!!");
 
     /* 4 :TCP Socket Recv Data */
     if (TYPE1SC.socketRecv(recvBuffer, sizeof(recvBuffer), &recvSize) == 0) {
-        DebugSerial.print("[Recv] >>  ");
-        DebugSerial.println(recvBuffer);
-        DebugSerial.print("[RecvSize] >>  ");
-        DebugSerial.println(recvSize);
+        ESP_LOGI(TAG, "[Recv] >>  %s", recvBuffer);
+        ESP_LOGI(TAG, "[RecvSize] >>  %d", recvSize);
     } else {
-        DebugSerial.println("Recv Fail!!!");
+        ESP_LOGI(TAG, "Recv Fail!!!");
     }
 
     /* 5 :TCP Socket DeActivation */
     if (TYPE1SC.socketDeActivate() == 0)
-        DebugSerial.println("TCP Socket DeActivation!!!");
+        ESP_LOGI(TAG, "TCP Socket DeActivation!!!");
 
     if (TYPE1SC.socketInfo(sckInfo, sizeof(sckInfo)) == 0) {
-        DebugSerial.print("Socket Info : ");
-        DebugSerial.println(sckInfo);
+        ESP_LOGI(TAG, "Socket Info : %s", sckInfo);
     }
 
     /* 6 :TCP Socket DeActivation */
     if (TYPE1SC.socketClose() == 0) {
-        DebugSerial.println("TCP Socket Close!!!");
+        ESP_LOGI(TAG, "TCP Socket Close!!!");
     }
 }
 
@@ -384,43 +358,43 @@ void type1scConnectAws() {
 
     /* 1 : Configure AWS_IOT parameters (ID, Address, tlsProfile) */
     if (TYPE1SC.setAWSIOT_CONN(cfg->thing_name, MQTT_HOST, tlsProfile) == 0) {
-        DebugSerial.println("\t1.Configure AWS_IOT parameter:ID, Address, tls Profile");
+        ESP_LOGI(TAG, "\t1.Configure AWS_IOT parameter:ID, Address, tls Profile");
     }
     delay(100);
 
     /* 2 : Configure AWS_IOT parameters (Connection Timeout) */
     if (TYPE1SC.setAWSIOT_TIMEOUT(conn_timeout) == 0) {
-        DebugSerial.println("\t2.Configure AWS_IOT parameter:Timeout");
+        ESP_LOGI(TAG, "\t2.Configure AWS_IOT parameter:Timeout");
     }
     delay(100);
 
     /* 3 : Enable AWS_IOT events */
     if (TYPE1SC.setAWSIOT_EV(1) == 0) {
-        DebugSerial.println("\t3.Enable AWS_IOT events");
+        ESP_LOGI(TAG, "\t3.Enable AWS_IOT events");
     }
     delay(100);
 
     /* 4 : Establish connection */
     if (TYPE1SC.AWSIOT_Connect() == 0) {
-        DebugSerial.println("\t4.Establish connection");
+        ESP_LOGI(TAG, "\t4.Establish connection");
     }
     delay(100);
 
     /* 5 : Subscribe (register) to the topic on the endpoint */
     if (TYPE1SC.AWSIOT_SUBSCRIBE(cfg->subTopic) == 0) {
-        DebugSerial.println("\t5.Subscribe to the topic on the endpoint");
+        ESP_LOGI(TAG, "\t5.Subscribe to the topic on the endpoint");
     }
     delay(100);
     if (TYPE1SC.AWSIOT_SUBSCRIBE(cfg->pubReportTopic) == 0) {
-        DebugSerial.println("\t5.Subscribe to the topic on the endpoint");
+        ESP_LOGI(TAG, "\t5.Subscribe to the topic on the endpoint");
     }
     delay(100);
     if (TYPE1SC.AWSIOT_SUBSCRIBE(cfg->pubPowerOnTopic) == 0) {
-        DebugSerial.println("\t5.Subscribe to the topic on the endpoint");
+        ESP_LOGI(TAG, "\t5.Subscribe to the topic on the endpoint");
     }
     delay(100);
     if (TYPE1SC.AWSIOT_SUBSCRIBE(cfg->pubEmergencyTopic) == 0) {
-        DebugSerial.println("\t5.Subscribe to the topic on the endpoint");
+        ESP_LOGI(TAG, "\t5.Subscribe to the topic on the endpoint");
     }
     delay(100);
 
@@ -429,18 +403,13 @@ void type1scConnectAws() {
     sprintf(_message, "Temperature/%s, Humidity/%s", "100", "56");
 
     /* 6 : Publish data to broker */
-    // if (TYPE1SC.AWSIOT_Publish(cfg->pubPowerOnTopic, _message) == 0) {
-    //     DebugSerial.println("\t6.Publish data to broker");
-    // } else {
-    //     DebugSerial.println("\t6.Something went wrong");
-    // }
     
     cfg->isConnected = true;
 
     if (type1scPowerOn() == true) {
-        DebugSerial.println("\t6.Publish data to broker");
+        ESP_LOGI(TAG, "\t6.Publish data to broker");
     } else {
-        DebugSerial.println("\t6.Something went wrong");
+        ESP_LOGI(TAG, "\t6.Something went wrong");
     }
 }
 

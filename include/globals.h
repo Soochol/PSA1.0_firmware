@@ -44,8 +44,18 @@
 
 // #define SENSORS_STM_CONNECTED
 
-// UART configuration flags
-// #define STM_HARDWARE_CONNECTED    // STM 하드웨어 연결 여부 (주석 처리하면 STM 없는 모드)
+// === UART 할당 모드 설정 ===
+// STM_HARDWARE_CONNECTED 매크로가 활성화/비활성화에 따라 UART 할당이 달라짐
+// 
+// [STM_HARDWARE_CONNECTED 활성화 시]
+// - ESP_LOG = UART0 (USB) → 디버깅 출력
+// - STMSerial = UART2 (GPIO 15/16) → STM 하드웨어 통신
+//
+// [STM_HARDWARE_CONNECTED 비활성화 시] 
+// - ESP_LOG = 비활성화 (출력 없음)
+// - STMSerial = UART0 (USB) → Python 테스트 통신
+//
+// STM_HARDWARE_CONNECTED 매크로는 platformio.ini에서 빌드 플래그로 관리됨
 
 /*
    MEMORY KEEPING
@@ -75,15 +85,16 @@
 #define ESP_U2_RXD      16
 #define ESP_U2_TXD      15
 
-// Hardware-specific serial port definitions
-#define STMSerial Serial2       // UART2 → STM communication
-#define LTESerial Serial1       // UART1 → LTE modem (uses Arduino framework Serial1)
+// === 하드웨어별 시리얼 포트 정의 ===
+#define LTESerial Serial1       // UART1 → LTE 모뎀 (고정)
 
-// Conditional debug serial mapping based on STM hardware presence
+// === 조건부 시리얼 매핑: STM 하드웨어 연결 여부에 따라 결정 ===
 #ifdef STM_HARDWARE_CONNECTED
-    #define DebugSerial Serial      // STM mode: Debug via USB (UART0)
+    // STM 하드웨어 연결 모드: ESP_LOG가 UART0(USB)로 디버깅 출력
+    #define STMSerial Serial2       // UART2 (GPIO 15/16) → STM 하드웨어 통신
 #else
-    #define DebugSerial Serial2     // Python mode: Debug via UART2
+    // Python 테스트 모드: ESP_LOG 비활성화, STMSerial만 사용  
+    #define STMSerial Serial        // UART0 (USB) → Python 테스트 통신
 #endif
 
 // ESP HEATER

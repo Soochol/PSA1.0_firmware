@@ -11,8 +11,8 @@
 #define STM             0x02    // start byte
 #define ETX             0x03    // end byte
 
-#define ESP_TO_STM_DIR  0x20    // ESP -> STM direction
-#define STM_TO_ESP_DIR  0x02    // STM -> ESP direction
+#define MSG_REQUEST     0x20    // Request message (any initiator)
+#define MSG_RESPONSE    0x02    // Response/ACK message (any responder)
 
 #define initTempSleep   0x10
 #define initTempWaiting 0x11
@@ -83,6 +83,18 @@ enum class ResponseType : uint8_t {
 #define MAX_RETRY_ATTEMPTS       3      // Maximum retry attempts
 #define RESPONSE_BUFFER_SIZE     64     // Maximum response data size
 
+// Multi-command management constants
+#define MAX_PENDING_COMMANDS     10      // Maximum simultaneous pending commands
+#define MAX_CONSECUTIVE_TIMEOUTS 3      // Maximum consecutive timeouts before critical error
+#define CRITICAL_ERROR_THRESHOLD 5000   // 5 seconds of communication failure = critical
+
+// System state management
+enum class SystemState : uint8_t {
+    NORMAL = 0,
+    COMMUNICATION_ERROR = 1,
+    CRITICAL_ERROR = 2
+};
+
 // Command tracking structure
 struct PendingCommand {
     uint8_t command;
@@ -112,8 +124,7 @@ struct PendingCommand {
     bool isTimeoutExpired(uint32_t currentTime) const {
         uint32_t timeout = (expectedResponse == ResponseType::DATA_RESPONSE) ? 
                           REQUEST_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
-        // Add exponential backoff based on retry count
-        timeout += (timeout / 2) * retryCount;  // 50% increase per retry
+        // Fixed timeout regardless of retry count for faster STM communication failure detection
         return (currentTime - sentTimestamp) > timeout;
     }
     
@@ -199,7 +210,7 @@ struct ProtocolMessage {
     uint8_t etx;
     
     bool isValid() const {
-        return stm == STM && etx == ETX && direction == STM_TO_ESP_DIR;
+        return stm == STM && etx == ETX && direction == MSG_REQUEST;
     }
     
     CommandType getCommandType() const {
@@ -214,13 +225,14 @@ uint8_t calculateChecksum(const byte* data, size_t length);
 bool checkMessage(const byte* incomingByteArray, size_t length);
 
 void sendResponse(uint8_t receivedCommand);
+void sendAckResponse(uint8_t receivedCommand);
 void nackResponse(); // Note: NACK not defined in protocol, logs only
 
 // New bidirectional communication functions
 bool sendCommandAsync(uint8_t command, const byte* data = nullptr, size_t dataLen = 0);
-bool sendCommandWithAck(uint8_t command, const byte* data = nullptr, size_t dataLen = 0, uint32_t timeoutMs = COMMAND_TIMEOUT_MS);
-bool sendRequestWithResponse(uint8_t command, uint8_t* responseBuffer, size_t* responseLength, uint32_t timeoutMs = REQUEST_TIMEOUT_MS);
-bool waitForResponse(uint8_t expectedCommand, ResponseType responseType, uint32_t timeoutMs);
+// bool sendCommandWithAck(uint8_t command, const byte* data = nullptr, size_t dataLen = 0, uint32_t timeoutMs = COMMAND_TIMEOUT_MS);
+// bool sendRequestWithResponse(uint8_t command, uint8_t* responseBuffer, size_t* responseLength, uint32_t timeoutMs = REQUEST_TIMEOUT_MS);
+// bool waitForResponse(uint8_t expectedCommand, ResponseType responseType, uint32_t timeoutMs);
 void handleInitResponse();
 void handleRequestResponse();
 void handleControlResponse();
@@ -230,11 +242,25 @@ CommandState getCommandState(uint8_t command);
 
 // Error handling and diagnostic functions
 const char* getCommandStateString(CommandState state);
-const char* getLastErrorString();
+// const char* getLastErrorString();
 bool isCommandInProgress();
 void clearPendingCommand();
 uint32_t getLastCommandTimestamp();
 uint8_t getCommandRetryCount();
+
+// System state management functions
+SystemState getCurrentSystemState();
+bool isSystemInErrorState();
+bool isCommunicationHealthy();
+bool manualRecoveryFromCriticalError();
+
+// Critical error handling functions
+void handleCommunicationError(uint32_t currentTime);
+void enterCriticalErrorState();
+void emergencyShutdownActuators();
+void setSystemErrorMode();
+void notifySystemError();
+void checkCommunicationRecovery();
 
 // New user-friendly API functions
 bool setSleepTemperature(float targetTemp);
@@ -289,6 +315,9 @@ bool setPoseDetectionMode(bool enabled);
 
 // Command name lookup function
 const char* getCommandName(uint8_t command);
+
+// ESP→STM Communication Test Functions
+void testESPtoSTMCommunication();
 
 bool sendCommandSafe(byte command, const byte* data = nullptr, size_t dataLen = 0);
 size_t buildMessage(uint8_t* buffer, byte command, const byte* data = nullptr, size_t dataLen = 0);

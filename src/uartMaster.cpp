@@ -4,9 +4,9 @@ static const char TAG[] = __FILE__;
 
 // ===== UART Configuration =====
 // UART0 (Serial): PC Python 테스트 프로토콜 통신용
-// UART2 (DebugSerial): 디버깅 로그 출력용
+// ESP_LOG: 디버깅 로그 출력용
 
-// HardwareSerial DebugSerial(2);  // UART2 for debug logs - moved to globals.h
+// ESP_LOG handles debug output automatically
 // STMSerial now directly uses the standardized serial definition from globals.h
 
 // Global variables for message parsing
@@ -27,13 +27,43 @@ static uint8_t lastErrorCode = 0;  // Last error code received (0 = no error)
 static uint8_t tinyMLInferenceResult = 0;
 static uint8_t finalResult = 0;
 
-// Global variables for command state management (ESP→STM)
-static PendingCommand currentPendingCommand = {};
-static bool waitingForResponse = false;
+// Global variables for multi-command state management (ESP→STM)
+static PendingCommand pendingCommands[MAX_PENDING_COMMANDS];
+static uint8_t nextCommandId = 1;
+
+// Global variables for system state tracking
+static SystemState currentSystemState = SystemState::NORMAL;
+static uint32_t lastCommunicationError = 0;
+static uint8_t consecutiveTimeouts = 0;
 
 // Variables for message construction
 byte LEN;
 uint8_t CHKSUM;
+
+// =============================================================================
+// Multi-Command Management Helper Functions
+// =============================================================================
+
+// Find empty slot in pending commands array
+static int findEmptySlot() {
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command == 0) {
+            return i;
+        }
+    }
+    return -1; // No empty slot found
+}
+
+// Find command slot by command code
+static int findCommandSlot(uint8_t command) {
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command == command && 
+            pendingCommands[i].state == CommandState::SENT) {
+            return i;
+        }
+    }
+    return -1; // Command not found
+}
 
 // =============================================================================
 // Core Protocol Functions
@@ -72,8 +102,45 @@ bool checkMessage(const byte* incomingByteArray, size_t length) {
 }
 
 void sendResponse(uint8_t receivedCommand) {
-    // Send protocol response with received command: STX + LEN + DIR + CMD + CHK + ETX
-    sendCommandSafe(receivedCommand);
+    // Send protocol ACK response: STX + LEN + DIR(0x02) + CMD + CHK + ETX
+    sendAckResponse(receivedCommand);
+}
+
+void sendAckResponse(uint8_t receivedCommand) {
+    // Stack-based buffer for ACK response
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t index = 0;
+    
+    // 1. STM (start byte)
+    buffer[index++] = STM;  // 0x02
+    
+    // 2. LEN (length: DIR + CMD + CHKSUM + ETX = 4)
+    buffer[index++] = 4;
+    
+    // 3. DIR (ACK direction)
+    buffer[index++] = MSG_RESPONSE;  // 0x02
+    
+    // 4. CMD (echo received command)
+    buffer[index++] = receivedCommand;
+    
+    // 5. CHECKSUM
+    uint8_t checksum = calculateChecksum(buffer, index);
+    buffer[index++] = checksum;
+    
+    // 6. ETX (end byte)
+    buffer[index++] = ETX;  // 0x03
+    
+    // Send the ACK
+    size_t bytesWritten = STMSerial.write(buffer, index);
+    STMSerial.flush();
+    
+    if (bytesWritten != index) {
+        ESP_LOGW(TAG, "[ACK-ERR] Failed to send complete ACK for 0x%02X (%zu/%zu bytes)", 
+                 receivedCommand, bytesWritten, index);
+    } else {
+        ESP_LOGI(TAG, "[ESP→STM] ACK 0x%02X %s (%zu bytes)", 
+                 receivedCommand, getCommandName(receivedCommand), index);
+    }
 }
 
 void nackResponse() {
@@ -95,7 +162,7 @@ size_t buildMessage(uint8_t* buffer, byte command, const byte* data, size_t data
     buffer[index++] = length;
     
     // 3. DIR (direction)
-    buffer[index++] = ESP_TO_STM_DIR;  // 0x20
+    buffer[index++] = MSG_REQUEST;  // 0x20
     
     // 4. CMD (command)
     buffer[index++] = command;
@@ -129,11 +196,22 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
         return false;
     }
     
+    // Log outgoing message
+    ESP_LOGI(TAG, "[ESP→STM] 0x%02X %s (%d bytes)", command, getCommandName(command), messageSize);
+    
+    // Hex dump of outgoing packet
+    char hexDump[256] = {0};
+    for (size_t i = 0; i < messageSize && i < 32; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
+                 "%02X ", buffer[i]);
+    }
+    ESP_LOGV(TAG, "[ESP→STM] Raw: %s", hexDump);
+    
     // Send message via UART
     size_t bytesWritten = STMSerial.write(buffer, messageSize);
     
     if (bytesWritten != messageSize) {
-        ESP_LOGW(TAG, "Failed to send complete command 0x%02X (%zu/%zu bytes)", 
+        ESP_LOGW(TAG, "[STM-ERR] Failed to send complete command 0x%02X (%zu/%zu bytes)", 
                  command, bytesWritten, messageSize);
         return false;
     }
@@ -205,7 +283,6 @@ bool parseIncomingByte(uint8_t byte) {
             currentMessage.etx = byte;
             messageBuffer[bufferIndex++] = byte;
             currentState = MessageState::MESSAGE_COMPLETE;
-            ESP_LOGI(TAG, "MSG: 0x%02X (%s)", currentMessage.command, getCommandName(currentMessage.command));
             return true; // Message complete
             
         default:
@@ -264,6 +341,11 @@ void handleStatusMessage() {
             setDeviceMode(DeviceMode::FORCE_UP);
             finalResult = 0;
         }
+        
+        // TODO: Add FORCE_DOWN control logic
+        // - Detect condition for FORCE_DOWN (e.g., specific sensor pattern, timeout, or user input)
+        // - Send setDeviceMode(DeviceMode::FORCE_DOWN) command
+        // - Log appropriate message for debugging
     }
 }
 
@@ -284,8 +366,6 @@ void handleModeChangeEvent() {
 }
 
 void handleEventMessage() {
-    ESP_LOGI(TAG, "EVENT: %s", getCommandName(currentMessage.command));
-    
     switch (currentMessage.command) {
         case evtInitStart:   // 0x80
             ESP_LOGI(TAG, "STM init started");
@@ -306,28 +386,38 @@ void handleEventMessage() {
 }
 
 void handleErrorMessage() {
-    ESP_LOGE(TAG, "ERROR: %s", getCommandName(currentMessage.command));
     if (currentMessage.dataLength > 0) {
         uint8_t errorCode = currentMessage.data[0];
         lastErrorCode = errorCode;  // Update error state
         
+        // 간결하고 직관적인 에러 메시지
         const char* errorMessages[] = {
-            "Unknown",              // 0
-            "Initialization Failed", // 1
-            "Communication Failed",  // 2
-            "SD Card Failed",       // 3
-            "Voltage Failed"        // 4
+            "ERR_UNKNOWN",      // 0
+            "ERR_INIT_FAIL",    // 1 - 초기화 실패
+            "ERR_COMM_FAIL",    // 2 - 통신 실패  
+            "ERR_SD_FAIL",      // 3 - SD 카드 실패
+            "ERR_VOLTAGE_FAIL"  // 4 - 전압 실패
+        };
+        
+        const char* errorDesc[] = {
+            "Unknown error",
+            "System initialization failed",
+            "Communication timeout/error", 
+            "SD card read/write failed",
+            "Power supply voltage error"
         };
         
         if (errorCode >= 1 && errorCode <= 4) {
-            ESP_LOGE(TAG, "%s (Code: %d)", errorMessages[errorCode], errorCode);
+            ESP_LOGI(TAG, "ERROR message ACK [Code:%d]", errorCode);
         } else {
-            ESP_LOGE(TAG, "Unknown error code: %d", errorCode);
+            ESP_LOGI(TAG, "ERROR message ACK [Invalid Code:%d]", errorCode);
         }
     } else {
-        ESP_LOGW(TAG, "Error message received without error code");
+        ESP_LOGI(TAG, "ERROR message ACK [No Data]");
     }
     sendResponse(currentMessage.command);
+    
+    // Python 테스트 모드에서는 시스템 상태 업데이트 생략
 }
 
 
@@ -434,49 +524,75 @@ void parseSensorData(const uint8_t* data, size_t length) {
 }
 
 void usartMasterHandler(void *pvParameters) {
+    static bool testExecuted = false;
+    static uint32_t startTime = xTaskGetTickCount();
+
     while (1) {
+        // // Check if 5 seconds have passed and test hasn't been executed yet
+        // if (!testExecuted && (xTaskGetTickCount() - startTime) > (5000 / portTICK_PERIOD_MS)) {
+        //     ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 시작 (within usartMasterHandler) ===");
+        //     testESPtoSTMCommunication();
+        //     ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 완료 ===");
+        //     testExecuted = true;
+        // }
+        
         while (STMSerial.available()) {
             uint8_t incomingByte = STMSerial.read();
             
             // Prevent buffer overflow
             if (bufferIndex >= USART_MESSAGE_MAXIMUM_LENGTH) {
-                ESP_LOGW(TAG, "Buffer overflow, resetting parser");
+                ESP_LOGW(TAG, "[STM-ERR] Buffer overflow, resetting parser");
                 resetParser();
                 continue;
             }
             
             // State machine based parsing
             if (parseIncomingByte(incomingByte)) {
+                // Message complete - create hex dump and log with command symbol
+                char hexDump[256] = {0};
+                for (size_t i = 0; i < bufferIndex && i < 32; i++) {
+                    snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
+                             "%02X ", messageBuffer[i]);
+                }
+                
+                // Single line log with packet and command symbol
+                ESP_LOGI(TAG, "[STM→ESP] %s→ %s", hexDump, getCommandName(currentMessage.command));
+                
                 // Message complete, verify checksum
                 if (!currentMessage.isValid()) {
-                    ESP_LOGW(TAG, "Invalid format: STM:0x%02X, ETX:0x%02X", currentMessage.stm, currentMessage.etx);
+                    ESP_LOGW(TAG, "[STM-ERR] Invalid format: STM=0x%02X (expect 0x%02X), DIR=0x%02X (expect 0x%02X), ETX=0x%02X (expect 0x%02X)", 
+                             currentMessage.stm, STM, currentMessage.direction, MSG_REQUEST, 
+                             currentMessage.etx, ETX);
                     resetParser();
                     continue;
                 }
                 
                 if (!checkMessage(messageBuffer, bufferIndex)) {
-                    ESP_LOGW(TAG, "Checksum FAIL");
+                    uint8_t calculatedChecksum = calculateChecksum(messageBuffer, bufferIndex);
+                    ESP_LOGW(TAG, "[STM-ERR] Checksum FAIL: received=0x%02X, calculated=0x%02X", 
+                             currentMessage.checksum, calculatedChecksum);
                     resetParser();
                     continue;
                 }
                 
                 // Handle according to message type and command classification
-                if (currentMessage.direction == STM_TO_ESP_DIR) {
+                if (currentMessage.direction == MSG_REQUEST) {
                     // Classify and process message by command type
                     CommandType cmdType = currentMessage.getCommandType();
                     
-                    ESP_LOGI(TAG, "→ %s", getCommandName(currentMessage.command));
-                    
                     switch (cmdType) {
                         case CommandType::STATUS:      // 0x70 - STM spontaneous sensor data
+                            // STM->ESP STATUS command with sensor data
                             handleStatusMessage();
                             break;
                             
                         case CommandType::EVENT:       // 0x8X - STM spontaneous state changes
+                            // STM->ESP EVENT command with state changes
                             handleEventMessage();
                             break;
                             
                         case CommandType::ERROR:       // 0x9X - STM spontaneous error reports
+                            // STM->ESP ERROR command with error details
                             handleErrorMessage();
                             break;
                             
@@ -500,27 +616,37 @@ void usartMasterHandler(void *pvParameters) {
                             break;
                     }
                 } else {
-                    ESP_LOGW(TAG, "Invalid direction: 0x%02X", currentMessage.direction);
+                    ESP_LOGW(TAG, "[STM-ERR] Invalid direction: 0x%02X (expected: 0x%02X)", 
+                             currentMessage.direction, MSG_REQUEST);
                 }
                 
                 resetParser();
             }
         }
         
-        // Retry sending message if ESP doesn't receive an ACK
-        // processCommandTimeout(); // temporarily disabled for simplicity 
+        // Check for command timeouts and handle critical errors
+        processCommandTimeout(); 
 
         vTaskDelay(10 / portTICK_RATE_MS); // More frequent checks for better responsiveness
     }
 }
 
 bool initUartMaster() {
-    // Initialize UART2 for STM communication (simulation mode)
+    // === UART 초기화: 하드웨어 연결 모드에 따라 STMSerial 설정 ===
+#ifdef STM_HARDWARE_CONNECTED
+    // STM 하드웨어 연결 모드: STMSerial = UART2 (GPIO 15/16) → STM 통신
     STMSerial.begin(115200, SERIAL_8N1, ESP_U2_RXD, ESP_U2_TXD);
+    ESP_LOGI(TAG, "STM Hardware Mode: STMSerial initialized on UART2 (GPIO %d/%d)", ESP_U2_RXD, ESP_U2_TXD);
+#else
+    // Python 테스트 모드: STMSerial = UART0 (USB) → Python 통신
+    STMSerial.begin(115200);
+    ESP_LOGI(TAG, "Python Test Mode: STMSerial initialized on UART0 (USB)");
+#endif
     
     // Initialize command state variables
-    currentPendingCommand.reset();
-    waitingForResponse = false;
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        pendingCommands[i].reset();
+    }
     
     // Initialize message parser
     resetParser();
@@ -536,7 +662,7 @@ bool initUartMaster() {
         UART_TASK_CORE
     );
     
-    DebugSerial.println("[STM-SIM] UART Master initialized");
+    ESP_LOGI(TAG, "[UART-MASTER] UART Master initialization completed");
     return true;
 }
 
@@ -546,116 +672,170 @@ bool initUartMaster() {
 
 void handleInitResponse() {
     // Handle INIT command ACKs (0x1X)
-    ESP_LOGI(TAG, "INIT ACK received for command 0x%02X (%s)", 
-             currentMessage.command, getCommandName(currentMessage.command));
+    int slot = findCommandSlot(currentMessage.command);
+    if (slot >= 0) {
+        pendingCommands[slot].state = CommandState::ACK_RECEIVED;
+        ESP_LOGI(TAG, "INIT ACK received for command 0x%02X (%s) (slot %d)", 
+                 currentMessage.command, getCommandName(currentMessage.command), slot);
+        
+        // Communication recovery check
+        if (currentSystemState != SystemState::NORMAL) {
+            checkCommunicationRecovery();
+        }
+        
+        // Clear completed command
+        pendingCommands[slot].reset();
+    } else {
+        ESP_LOGI(TAG, "INIT ACK received for command 0x%02X (%s) (no pending command)", 
+                 currentMessage.command, getCommandName(currentMessage.command));
+    }
 }
 
 void handleRequestResponse() {
     // Handle REQUEST command responses with data (0x3X)
-    ESP_LOGI(TAG, "REQUEST response received for command 0x%02X (%s)", 
-             currentMessage.command, getCommandName(currentMessage.command));
-    
-    switch (currentMessage.command) {
-        case reqTempSleep:      // 0x30
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                ESP_LOGI(TAG, "Sleep temp response: %.1f°C", systemConfig.sleepTemp);
-            } else {
-                ESP_LOGW(TAG, "Invalid sleep temp response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqTempWaiting:    // 0x31
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                ESP_LOGI(TAG, "Waiting temp response: %.1f°C", systemConfig.waitingTemp);
-            } else {
-                ESP_LOGW(TAG, "Invalid waiting temp response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqTempForceUp:    // 0x32
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                ESP_LOGI(TAG, "Operating temp response: %.1f°C", systemConfig.operatingTemp);
-            } else {
-                ESP_LOGW(TAG, "Invalid operating temp response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqTempHeatPad:    // 0x33 - DEPRECATED
-            // This command is deprecated and no longer supported
-            ESP_LOGW(TAG, "reqTempHeatPad (0x33) is deprecated and ignored");
-            break;
-            
-        case reqUpperTemp:      // 0x34
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                ESP_LOGI(TAG, "Upper temp limit response: %.1f°C", systemConfig.upperTempLimit);
-            } else {
-                ESP_LOGW(TAG, "Invalid upper temp limit response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqPWMCoolFan:     // 0x35
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.coolingFanLevel = currentMessage.data[0];
-                systemConfig.maxCoolingFanLevel = currentMessage.data[1];
-                ESP_LOGI(TAG, "Cooling fan level response: %d/%d", systemConfig.coolingFanLevel, systemConfig.maxCoolingFanLevel);
-            } else {
-                ESP_LOGW(TAG, "Invalid cooling fan level response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqTimeout:        // 0x36
-            if (currentMessage.dataLength >= 8) {
-                systemConfig.forceUpTimeout = (currentMessage.data[0] << 8) | currentMessage.data[1];
-                systemConfig.forceOnTimeout = (currentMessage.data[2] << 8) | currentMessage.data[3];
-                systemConfig.forceDownTimeout = (currentMessage.data[4] << 8) | currentMessage.data[5];
-                systemConfig.waitingTimeout = (currentMessage.data[6] << 8) | currentMessage.data[7];
-                ESP_LOGI(TAG, "Timeout response: ForceUp=%d, ForceOn=%d, ForceDown=%d, Waiting=%d", 
-                         systemConfig.forceUpTimeout, systemConfig.forceOnTimeout, systemConfig.forceDownTimeout, systemConfig.waitingTimeout);
-            } else {
-                ESP_LOGW(TAG, "Invalid timeout response length: %d (expected 8)", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqSpk:            // 0x37
-            if (currentMessage.dataLength >= 1) {
-                systemConfig.speakerVolume = currentMessage.data[0];
-                ESP_LOGI(TAG, "Speaker volume response: %d", systemConfig.speakerVolume);
-            } else {
-                ESP_LOGW(TAG, "Invalid speaker volume response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        case reqDelay:          // 0x38
-            if (currentMessage.dataLength >= 2) {
-                systemConfig.poseDetectionDelay = currentMessage.data[0];    // 100ms units
-                systemConfig.objectDetectionDelay = currentMessage.data[1];  // 100ms units
-                ESP_LOGI(TAG, "Detection delay response: Pose=%d00ms, Object=%d00ms", 
-                         systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay);
-            } else {
-                ESP_LOGW(TAG, "Invalid detection delay response length: %d", currentMessage.dataLength);
-            }
-            break;
-            
-        default:
-            ESP_LOGW(TAG, "Unknown REQUEST response: 0x%02X", currentMessage.command);
-            break;
+    int slot = findCommandSlot(currentMessage.command);
+    if (slot >= 0) {
+        pendingCommands[slot].state = CommandState::DATA_RECEIVED;
+        
+        // Store response data
+        if (currentMessage.dataLength > 0) {
+            size_t copyLen = (currentMessage.dataLength < RESPONSE_BUFFER_SIZE) ? currentMessage.dataLength : RESPONSE_BUFFER_SIZE;
+            memcpy(pendingCommands[slot].responseData, currentMessage.data, copyLen);
+            pendingCommands[slot].responseLength = copyLen;
+        }
+        
+        ESP_LOGI(TAG, "REQUEST response received for command 0x%02X (%s) (slot %d)", 
+                 currentMessage.command, getCommandName(currentMessage.command), slot);
+        
+        // Communication recovery check
+        if (currentSystemState != SystemState::NORMAL) {
+            checkCommunicationRecovery();
+        }
+        
+        // Process response data based on command type
+        switch (currentMessage.command) {
+            case reqTempSleep:      // 0x30
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    ESP_LOGI(TAG, "Sleep temp response: %.1f°C", systemConfig.sleepTemp);
+                } else {
+                    ESP_LOGW(TAG, "Invalid sleep temp response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqTempWaiting:    // 0x31
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    ESP_LOGI(TAG, "Waiting temp response: %.1f°C", systemConfig.waitingTemp);
+                } else {
+                    ESP_LOGW(TAG, "Invalid waiting temp response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqTempForceUp:    // 0x32
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    ESP_LOGI(TAG, "Operating temp response: %.1f°C", systemConfig.operatingTemp);
+                } else {
+                    ESP_LOGW(TAG, "Invalid operating temp response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqTempHeatPad:    // 0x33 - DEPRECATED
+                ESP_LOGW(TAG, "reqTempHeatPad (0x33) is deprecated and ignored");
+                break;
+                
+            case reqUpperTemp:      // 0x34
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    ESP_LOGI(TAG, "Upper temp limit response: %.1f°C", systemConfig.upperTempLimit);
+                } else {
+                    ESP_LOGW(TAG, "Invalid upper temp limit response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqPWMCoolFan:     // 0x35
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.coolingFanLevel = currentMessage.data[0];
+                    systemConfig.maxCoolingFanLevel = currentMessage.data[1];
+                    ESP_LOGI(TAG, "Cooling fan level response: %d/%d", systemConfig.coolingFanLevel, systemConfig.maxCoolingFanLevel);
+                } else {
+                    ESP_LOGW(TAG, "Invalid cooling fan level response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqTimeout:        // 0x36
+                if (currentMessage.dataLength >= 8) {
+                    systemConfig.forceUpTimeout = (currentMessage.data[0] << 8) | currentMessage.data[1];
+                    systemConfig.forceOnTimeout = (currentMessage.data[2] << 8) | currentMessage.data[3];
+                    systemConfig.forceDownTimeout = (currentMessage.data[4] << 8) | currentMessage.data[5];
+                    systemConfig.waitingTimeout = (currentMessage.data[6] << 8) | currentMessage.data[7];
+                    ESP_LOGI(TAG, "Timeout response: ForceUp=%d, ForceOn=%d, ForceDown=%d, Waiting=%d", 
+                             systemConfig.forceUpTimeout, systemConfig.forceOnTimeout, systemConfig.forceDownTimeout, systemConfig.waitingTimeout);
+                } else {
+                    ESP_LOGW(TAG, "Invalid timeout response length: %d (expected 8)", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqSpk:            // 0x37
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.speakerVolume = currentMessage.data[0];
+                    ESP_LOGI(TAG, "Speaker volume response: %d", systemConfig.speakerVolume);
+                } else {
+                    ESP_LOGW(TAG, "Invalid speaker volume response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqDelay:          // 0x38
+                if (currentMessage.dataLength >= 2) {
+                    systemConfig.poseDetectionDelay = currentMessage.data[0];    // 100ms units
+                    systemConfig.objectDetectionDelay = currentMessage.data[1];  // 100ms units
+                    ESP_LOGI(TAG, "Detection delay response: Pose=%d00ms, Object=%d00ms", 
+                             systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay);
+                } else {
+                    ESP_LOGW(TAG, "Invalid detection delay response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            default:
+                ESP_LOGW(TAG, "Unknown REQUEST response: 0x%02X", currentMessage.command);
+                break;
+        }
+        
+        // Clear completed command
+        pendingCommands[slot].reset();
+    } else {
+        ESP_LOGI(TAG, "REQUEST response received for command 0x%02X (%s) (no pending command)", 
+                 currentMessage.command, getCommandName(currentMessage.command));
     }
 }
 
 void handleControlResponse() {
     // Handle CONTROL command ACKs (0x5X)
-    ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X (%s)", 
-             currentMessage.command, getCommandName(currentMessage.command));
+    int slot = findCommandSlot(currentMessage.command);
+    if (slot >= 0) {
+        pendingCommands[slot].state = CommandState::ACK_RECEIVED;
+        ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X (%s) (slot %d)", 
+                 currentMessage.command, getCommandName(currentMessage.command), slot);
+        
+        // Communication recovery check
+        if (currentSystemState != SystemState::NORMAL) {
+            checkCommunicationRecovery();
+        }
+        
+        // Clear completed command
+        pendingCommands[slot].reset();
+    } else {
+        ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X (%s) (no pending command)", 
+                 currentMessage.command, getCommandName(currentMessage.command));
+    }
 }
 
 bool sendCommandAsync(uint8_t command, const byte* data, size_t dataLen) {
-    if (waitingForResponse) {
-        ESP_LOGW(TAG, "Cannot send command 0x%02X (%s) - already waiting for response", 
-                 command, getCommandName(command));
+    int slot = findEmptySlot();
+    if (slot == -1) {
+        ESP_LOGW(TAG, "Cannot send command 0x%02X (%s) - no free slots (max %d)", 
+                 command, getCommandName(command), MAX_PENDING_COMMANDS);
         return false;
     }
     
@@ -666,175 +846,234 @@ bool sendCommandAsync(uint8_t command, const byte* data, size_t dataLen) {
         expectedResponse = ResponseType::DATA_RESPONSE;
     }
     
-    // Setup pending command tracking
-    currentPendingCommand.reset();
-    currentPendingCommand.command = command;
-    currentPendingCommand.expectedResponse = expectedResponse;
-    currentPendingCommand.state = CommandState::SENT;
-    currentPendingCommand.sentTimestamp = millis();
-    currentPendingCommand.backupOriginalData(data, dataLen);
-    waitingForResponse = true;
+    // Setup pending command tracking in available slot
+    pendingCommands[slot].reset();
+    pendingCommands[slot].command = command;
+    pendingCommands[slot].expectedResponse = expectedResponse;
+    pendingCommands[slot].state = CommandState::SENT;
+    pendingCommands[slot].sentTimestamp = millis();
+    pendingCommands[slot].backupOriginalData(data, dataLen);
     
     // Send the command and return immediately - No waiting!
     if (!sendCommandSafe(command, data, dataLen)) {
         ESP_LOGE(TAG, "Failed to send command 0x%02X (%s)", command, getCommandName(command));
-        currentPendingCommand.state = CommandState::ERROR;
-        waitingForResponse = false;
+        pendingCommands[slot].reset();
         return false;
     }
     
-    ESP_LOGI(TAG, "Command 0x%02X (%s) sent asynchronously", command, getCommandName(command));
+    ESP_LOGI(TAG, "Command 0x%02X (%s) sent asynchronously (slot %d)", 
+             command, getCommandName(command), slot);
     return true;
 }
 
-bool sendCommandWithAck(uint8_t command, const byte* data, size_t dataLen, uint32_t timeoutMs) {
-    if (waitingForResponse) {
-        ESP_LOGW(TAG, "Cannot send command 0x%02X (%s) - already waiting for response", 
-                 command, getCommandName(command));
-        return false;
-    }
-    
-    // Determine response type based on command
-    ResponseType expectedResponse = ResponseType::ACK_ONLY;
-    CommandType cmdType = static_cast<CommandType>(command & 0xF0);
-    if (cmdType == CommandType::REQUEST) {
-        expectedResponse = ResponseType::DATA_RESPONSE;
-    }
-    
-    // Setup pending command tracking
-    currentPendingCommand.reset();
-    currentPendingCommand.command = command;
-    currentPendingCommand.expectedResponse = expectedResponse;
-    currentPendingCommand.state = CommandState::SENT;
-    currentPendingCommand.sentTimestamp = millis();
-    currentPendingCommand.backupOriginalData(data, dataLen);  // Backup original data for retry
-    waitingForResponse = true;
-    
-    // Send the command
-    if (!sendCommandSafe(command, data, dataLen)) {
-        ESP_LOGE(TAG, "Failed to send command 0x%02X (%s)", command, getCommandName(command));
-        currentPendingCommand.state = CommandState::ERROR;
-        waitingForResponse = false;
-        return false;
-    }
-    
-    // Wait for response
-    return waitForResponse(command, expectedResponse, timeoutMs);
-}
-
-bool sendRequestWithResponse(uint8_t command, uint8_t* responseBuffer, size_t* responseLength, uint32_t timeoutMs) {
-    if (!responseBuffer || !responseLength) {
-        ESP_LOGE(TAG, "Invalid response buffer parameters");
-        return false;
-    }
-    
-    *responseLength = 0;
-    
-    if (!sendCommandWithAck(command, nullptr, 0, timeoutMs)) {
-        return false;
-    }
-    
-    // Copy response data if available
-    if (currentPendingCommand.state == CommandState::DATA_RECEIVED && 
-        currentPendingCommand.responseLength > 0) {
-        size_t copyLength = min(currentPendingCommand.responseLength, *responseLength);
-        memcpy(responseBuffer, currentPendingCommand.responseData, copyLength);
-        *responseLength = copyLength;
-        return true;
-    }
-    
-    return false;
-}
-
-bool waitForResponse(uint8_t expectedCommand, ResponseType responseType, uint32_t timeoutMs) {
-    uint32_t startTime = millis();
-    
-    // Poll for response completion with timeout
-    while (millis() - startTime < timeoutMs) {
-        if (currentPendingCommand.command == expectedCommand) {
-            if (currentPendingCommand.state == CommandState::ACK_RECEIVED ||
-                currentPendingCommand.state == CommandState::DATA_RECEIVED) {
-                ESP_LOGI(TAG, "Command 0x%02X (%s) completed successfully", 
-                         expectedCommand, getCommandName(expectedCommand));
-                return true;
-            } else if (currentPendingCommand.state == CommandState::ERROR ||
-                       currentPendingCommand.state == CommandState::TIMEOUT) {
-                ESP_LOGW(TAG, "Command 0x%02X (%s) completed with error state: %d", 
-                         expectedCommand, getCommandName(expectedCommand), static_cast<int>(currentPendingCommand.state));
-                return false;
-            }
-        }
-        
-        // Small delay to prevent busy waiting
-        delay(10);
-    }
-    
-    // Timeout occurred
-    ESP_LOGW(TAG, "Timeout waiting for response to command 0x%02X (%s)", 
-             expectedCommand, getCommandName(expectedCommand));
-    currentPendingCommand.state = CommandState::TIMEOUT;
-    waitingForResponse = false;
-    return false;
-}
 
 bool isResponseExpected() {
-    return waitingForResponse;
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 CommandState getCommandState(uint8_t command) {
-    if (currentPendingCommand.command == command) {
-        return currentPendingCommand.state;
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command == command) {
+            return pendingCommands[i].state;
+        }
     }
     return CommandState::IDLE;
 }
 
 void processCommandTimeout() {
-    if (!waitingForResponse) {
+    uint32_t currentTime = millis();
+    bool hasTimeoutError = false;
+    
+    // Check all pending commands for timeouts
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command != 0 && 
+            pendingCommands[i].state == CommandState::SENT &&
+            pendingCommands[i].isTimeoutExpired(currentTime)) {
+            
+            uint32_t elapsedTime = currentTime - pendingCommands[i].sentTimestamp;
+            ESP_LOGW(TAG, "Command 0x%02X (%s) timed out after %lu ms (slot %d, attempt %d/%d)", 
+                     pendingCommands[i].command, getCommandName(pendingCommands[i].command), 
+                     elapsedTime, i, pendingCommands[i].retryCount + 1, MAX_RETRY_ATTEMPTS + 1);
+            
+            if (pendingCommands[i].retryCount < MAX_RETRY_ATTEMPTS) {
+                // Retry the command with original data
+                pendingCommands[i].retryCount++;
+                pendingCommands[i].sentTimestamp = currentTime;
+                pendingCommands[i].state = CommandState::SENT;
+                
+                ESP_LOGI(TAG, "Retrying command 0x%02X (%s) (slot %d, attempt %d/%d)", 
+                         pendingCommands[i].command, getCommandName(pendingCommands[i].command), i,
+                         pendingCommands[i].retryCount + 1, MAX_RETRY_ATTEMPTS + 1);
+                
+                // Resend the command with original data
+                const byte* retryData = (pendingCommands[i].originalDataLength > 0) ? 
+                                       pendingCommands[i].originalData : nullptr;
+                
+                if (!sendCommandSafe(pendingCommands[i].command, retryData, pendingCommands[i].originalDataLength)) {
+                    ESP_LOGE(TAG, "Failed to resend command 0x%02X (%s) on retry %d (slot %d)", 
+                             pendingCommands[i].command, getCommandName(pendingCommands[i].command), 
+                             pendingCommands[i].retryCount, i);
+                    pendingCommands[i].reset();
+                    hasTimeoutError = true;
+                }
+            } else {
+                // Max retries exceeded - Critical communication failure
+                ESP_LOGE(TAG, "CRITICAL: Command 0x%02X (%s) FAILED after %d attempts (slot %d)", 
+                         pendingCommands[i].command, getCommandName(pendingCommands[i].command), 
+                         MAX_RETRY_ATTEMPTS + 1, i);
+                
+                pendingCommands[i].reset();
+                hasTimeoutError = true;
+                
+                // Increment consecutive timeout counter
+                consecutiveTimeouts++;
+                lastCommunicationError = currentTime;
+            }
+        }
+    }
+    
+    // Handle communication error if any timeouts occurred
+    if (hasTimeoutError) {
+        handleCommunicationError(currentTime);
+    }
+}
+
+// =============================================================================
+// System State Management and Critical Error Handling Functions
+// =============================================================================
+
+void handleCommunicationError(uint32_t currentTime) {
+    ESP_LOGE(TAG, "Communication error detected (consecutive timeouts: %d)", consecutiveTimeouts);
+    
+    // Check for critical communication failure conditions
+    if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+        ESP_LOGE(TAG, "CRITICAL COMMUNICATION FAILURE - Too many consecutive timeouts (%d)", consecutiveTimeouts);
+        enterCriticalErrorState();
         return;
     }
     
-    uint32_t currentTime = millis();
-    if (currentPendingCommand.isTimeoutExpired(currentTime)) {
-        uint32_t elapsedTime = currentTime - currentPendingCommand.sentTimestamp;
-        ESP_LOGW(TAG, "Command 0x%02X (%s) timed out after %lu ms (attempt %d/%d)", 
-                 currentPendingCommand.command, getCommandName(currentPendingCommand.command), elapsedTime,
-                 currentPendingCommand.retryCount + 1, MAX_RETRY_ATTEMPTS + 1);
-        
-        if (currentPendingCommand.retryCount < MAX_RETRY_ATTEMPTS) {
-            // Retry the command with original data
-            currentPendingCommand.retryCount++;
-            currentPendingCommand.sentTimestamp = currentTime;
-            currentPendingCommand.state = CommandState::SENT;
-            
-            uint32_t nextTimeout = (currentPendingCommand.expectedResponse == ResponseType::DATA_RESPONSE) ? 
-                                  REQUEST_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
-            nextTimeout += (nextTimeout / 2) * currentPendingCommand.retryCount;  // Exponential backoff
-            
-            ESP_LOGI(TAG, "Retrying command 0x%02X (%s) (attempt %d/%d, timeout: %lu ms)", 
-                     currentPendingCommand.command, getCommandName(currentPendingCommand.command),
-                     currentPendingCommand.retryCount + 1, 
-                     MAX_RETRY_ATTEMPTS + 1,
-                     nextTimeout);
-            
-            // Resend the command with original data
-            const byte* retryData = (currentPendingCommand.originalDataLength > 0) ? 
-                                   currentPendingCommand.originalData : nullptr;
-            
-            if (!sendCommandSafe(currentPendingCommand.command, retryData, currentPendingCommand.originalDataLength)) {
-                ESP_LOGE(TAG, "Failed to resend command 0x%02X (%s) on retry %d", 
-                         currentPendingCommand.command, getCommandName(currentPendingCommand.command), currentPendingCommand.retryCount);
-                currentPendingCommand.state = CommandState::ERROR;
-                waitingForResponse = false;
-            }
-        } else {
-            // Max retries exceeded
-            ESP_LOGE(TAG, "Command 0x%02X (%s) FAILED after %d attempts (total time: %lu ms)", 
-                     currentPendingCommand.command, getCommandName(currentPendingCommand.command), MAX_RETRY_ATTEMPTS + 1,
-                     currentTime - (currentPendingCommand.sentTimestamp - elapsedTime));
-            currentPendingCommand.state = CommandState::ERROR;
-            waitingForResponse = false;
-        }
+    // Check for prolonged communication failure
+    if (lastCommunicationError > 0 && 
+        (currentTime - lastCommunicationError) < CRITICAL_ERROR_THRESHOLD) {
+        ESP_LOGE(TAG, "CRITICAL COMMUNICATION FAILURE - No response for %lu ms", 
+                 currentTime - lastCommunicationError);
+        enterCriticalErrorState();
+        return;
     }
+    
+    // Set communication error state (but not critical yet)
+    if (currentSystemState == SystemState::NORMAL) {
+        currentSystemState = SystemState::COMMUNICATION_ERROR;
+        ESP_LOGW(TAG, "System state changed to COMMUNICATION_ERROR");
+    }
+}
+
+void enterCriticalErrorState() {
+    currentSystemState = SystemState::CRITICAL_ERROR;
+    
+    ESP_LOGE(TAG, "=== ENTERING CRITICAL ERROR STATE ===");
+    ESP_LOGE(TAG, "STM communication completely failed");
+    ESP_LOGE(TAG, "Shutting down actuators for safety");
+    
+    // Execute emergency safety measures
+    emergencyShutdownActuators();
+    setSystemErrorMode();
+    notifySystemError();
+    
+    ESP_LOGE(TAG, "=== SYSTEM IN SAFE MODE ===");
+}
+
+void emergencyShutdownActuators() {
+    ESP_LOGE(TAG, "Emergency shutdown: Turning OFF all actuators");
+    
+    // Cannot send commands to STM due to communication failure
+    // STM should implement its own safety timeout mechanism
+    ESP_LOGW(TAG, "Cannot send shutdown commands to STM - communication failed");
+    ESP_LOGW(TAG, "STM should implement its own safety timeout mechanism");
+    
+    // Local safety measures that don't require STM communication
+    // TODO: Add any local GPIO-controlled safety measures here
+    // Example: gpio_set_level(EMERGENCY_SHUTDOWN_PIN, 0);
+    
+    ESP_LOGE(TAG, "Local emergency shutdown completed");
+}
+
+void setSystemErrorMode() {
+    // Set internal system state to error mode
+    currentSystemState = SystemState::CRITICAL_ERROR;
+    
+    // Stop non-critical processing
+    // TODO: Add any system-specific shutdown procedures
+    // Example: stopTinyMLProcessing();
+    // Example: stopSensorProcessing();
+    
+    ESP_LOGE(TAG, "System error mode activated");
+}
+
+void notifySystemError() {
+    // Notify external systems of critical error
+    // TODO: Implement based on system requirements
+    
+    // 1. Cloud notification (if LTE is available)
+    // publishErrorToCloud("STM_COMMUNICATION_FAILURE");
+    
+    // 2. Local indicators (LED, buzzer, etc.)
+    // setErrorLED(true);
+    
+    // 3. Log critical error
+    ESP_LOGE(TAG, "SYSTEM ERROR NOTIFICATION: STM communication failure");
+}
+
+void checkCommunicationRecovery() {
+    // Communication recovered - reset timeout counters
+    consecutiveTimeouts = 0;
+    
+    if (currentSystemState == SystemState::COMMUNICATION_ERROR) {
+        ESP_LOGI(TAG, "Communication recovered - returning to normal state");
+        currentSystemState = SystemState::NORMAL;
+        
+        // TODO: Add any recovery procedures here
+        // restoreNormalOperation();
+    } else if (currentSystemState == SystemState::CRITICAL_ERROR) {
+        ESP_LOGW(TAG, "Communication recovered but system still in critical error");
+        ESP_LOGW(TAG, "Manual intervention may be required for full recovery");
+        // Critical error requires manual recovery
+    }
+}
+
+// System state query functions
+SystemState getCurrentSystemState() {
+    return currentSystemState;
+}
+
+bool isSystemInErrorState() {
+    return (currentSystemState == SystemState::COMMUNICATION_ERROR || 
+            currentSystemState == SystemState::CRITICAL_ERROR);
+}
+
+bool isCommunicationHealthy() {
+    return (currentSystemState == SystemState::NORMAL && consecutiveTimeouts == 0);
+}
+
+bool manualRecoveryFromCriticalError() {
+    if (currentSystemState == SystemState::CRITICAL_ERROR) {
+        ESP_LOGW(TAG, "Manual recovery initiated from critical error state");
+        currentSystemState = SystemState::NORMAL;
+        consecutiveTimeouts = 0;
+        lastCommunicationError = 0;
+        
+        // TODO: Add system reinitialization if needed
+        // reinitializeSystem();
+        
+        ESP_LOGI(TAG, "System manually recovered from critical error");
+        return true;
+    }
+    return false;
 }
 
 // =============================================================================
@@ -853,45 +1092,63 @@ const char* getCommandStateString(CommandState state) {
     }
 }
 
-const char* getLastErrorString() {
-    if (currentPendingCommand.state == CommandState::TIMEOUT) {
-        return "Command timeout - STM did not respond";
-    } else if (currentPendingCommand.state == CommandState::ERROR) {
-        return "Command error - Invalid response or communication failure";
-    } else if (lastErrorCode > 0) {
-        const char* errorMessages[] = {
-            "No error",                 // 0
-            "Initialization Failed",    // 1
-            "Communication Failed",     // 2
-            "SD Card Failed",          // 3
-            "Voltage Failed"           // 4
-        };
+// const char* getLastErrorString() {
+//     if (currentPendingCommand.state == CommandState::TIMEOUT) {
+//         return "Command timeout - STM did not respond";
+//     } else if (currentPendingCommand.state == CommandState::ERROR) {
+//         return "Command error - Invalid response or communication failure";
+//     } else if (lastErrorCode > 0) {
+//         const char* errorMessages[] = {
+//             "No error",                 // 0
+//             "Initialization Failed",    // 1
+//             "Communication Failed",     // 2
+//             "SD Card Failed",          // 3
+//             "Voltage Failed"           // 4
+//         };
         
-        if (lastErrorCode >= 1 && lastErrorCode <= 4) {
-            return errorMessages[lastErrorCode];
-        } else {
-            return "Unknown STM error";
-        }
-    }
-    return "No error";
-}
+//         if (lastErrorCode >= 1 && lastErrorCode <= 4) {
+//             return errorMessages[lastErrorCode];
+//         } else {
+//             return "Unknown STM error";
+//         }
+//     }
+//     return "No error";
+// }
 
 bool isCommandInProgress() {
-    return waitingForResponse && (currentPendingCommand.state == CommandState::SENT);
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command != 0 && pendingCommands[i].state == CommandState::SENT) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void clearPendingCommand() {
-    currentPendingCommand.reset();
-    waitingForResponse = false;
-    ESP_LOGI(TAG, "Pending command cleared");
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        pendingCommands[i].reset();
+    }
+    ESP_LOGI(TAG, "All pending commands cleared");
 }
 
 uint32_t getLastCommandTimestamp() {
-    return currentPendingCommand.sentTimestamp;
+    uint32_t latestTimestamp = 0;
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command != 0 && pendingCommands[i].sentTimestamp > latestTimestamp) {
+            latestTimestamp = pendingCommands[i].sentTimestamp;
+        }
+    }
+    return latestTimestamp;
 }
 
 uint8_t getCommandRetryCount() {
-    return currentPendingCommand.retryCount;
+    uint8_t maxRetries = 0;
+    for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
+        if (pendingCommands[i].command != 0 && pendingCommands[i].retryCount > maxRetries) {
+            maxRetries = pendingCommands[i].retryCount;
+        }
+    }
+    return maxRetries;
 }
 
 // =============================================================================
@@ -1312,4 +1569,266 @@ uint8_t getPoseDetectionDelay() {
 
 uint8_t getObjectDetectionDelay() {
     return systemConfig.objectDetectionDelay;
+}
+
+// =============================================================================
+// ESP→STM Communication Test Functions
+// =============================================================================
+
+void testESPtoSTMCommunication() {
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "======================================================");
+    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 시작 ===");
+    ESP_LOGI(TAG, "======================================================");
+    
+    uint32_t testStartTime = millis();
+    uint8_t totalTests = 0;
+    uint8_t passedTests = 0;
+    
+    // 테스트 시작 전 대기
+    ESP_LOGI(TAG, "테스트 시작 전 2초 대기...");
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    
+    // =================
+    // 1. INIT 명령 테스트
+    // =================
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "=== INIT 명령 테스트 (0x1X) ===");
+    
+    // 1-1. Sleep Temperature
+    ESP_LOGI(TAG, "1-1. Sleep Temperature 설정 테스트");
+    totalTests++;
+    if (setSleepTemperature(25.5)) {
+        ESP_LOGI(TAG, "✓ Sleep Temperature 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Sleep Temperature 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 1-2. Waiting Temperature
+    ESP_LOGI(TAG, "1-2. Waiting Temperature 설정 테스트");
+    totalTests++;
+    if (setWaitingTemperature(30.0)) {
+        ESP_LOGI(TAG, "✓ Waiting Temperature 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Waiting Temperature 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 1-3. Operating Temperature
+    ESP_LOGI(TAG, "1-3. Operating Temperature 설정 테스트");
+    totalTests++;
+    if (setOperatingTemperature(35.0)) {
+        ESP_LOGI(TAG, "✓ Operating Temperature 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Operating Temperature 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 1-4. Upper Temperature Limit
+    ESP_LOGI(TAG, "1-4. Upper Temperature Limit 설정 테스트");
+    totalTests++;
+    if (setUpperTemperatureLimit(40.0)) {
+        ESP_LOGI(TAG, "✓ Upper Temperature Limit 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Upper Temperature Limit 명령 전송 실패");
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    // ===================
+    // 2. REQUEST 명령 테스트
+    // ===================
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "=== REQUEST 명령 테스트 (0x3X) ===");
+    
+    // 2-1. Sleep Temperature Request
+    ESP_LOGI(TAG, "2-1. Sleep Temperature 요청 테스트");
+    totalTests++;
+    if (requestSleepTemperature()) {
+        ESP_LOGI(TAG, "✓ Sleep Temperature 요청 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Sleep Temperature 요청 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 2-2. Speaker Volume Request
+    ESP_LOGI(TAG, "2-2. Speaker Volume 요청 테스트");
+    totalTests++;
+    if (requestSpeakerVolume()) {
+        ESP_LOGI(TAG, "✓ Speaker Volume 요청 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Speaker Volume 요청 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 2-3. Cooling Fan Level Request
+    ESP_LOGI(TAG, "2-3. Cooling Fan Level 요청 테스트");
+    totalTests++;
+    if (requestCoolingFanLevel()) {
+        ESP_LOGI(TAG, "✓ Cooling Fan Level 요청 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Cooling Fan Level 요청 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 2-4. Detection Delay Request
+    ESP_LOGI(TAG, "2-4. Detection Delay 요청 테스트");
+    totalTests++;
+    if (requestDetectionDelay()) {
+        ESP_LOGI(TAG, "✓ Detection Delay 요청 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Detection Delay 요청 명령 전송 실패");
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    // ====================
+    // 3. CONTROL 명령 테스트
+    // ====================
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "=== CONTROL 명령 테스트 (0x5X) ===");
+    
+    // 3-1. Device Mode - WAITING
+    ESP_LOGI(TAG, "3-1. Device Mode → WAITING 테스트");
+    totalTests++;
+    if (setDeviceMode(DeviceMode::WAITING)) {
+        ESP_LOGI(TAG, "✓ Device Mode WAITING 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Device Mode WAITING 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-2. Device Mode - FORCE_UP
+    ESP_LOGI(TAG, "3-2. Device Mode → FORCE_UP 테스트");
+    totalTests++;
+    if (setDeviceMode(DeviceMode::FORCE_UP)) {
+        ESP_LOGI(TAG, "✓ Device Mode FORCE_UP 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Device Mode FORCE_UP 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-3. Fan State Control
+    ESP_LOGI(TAG, "3-3. Fan State ON 테스트");
+    totalTests++;
+    if (setFanState(true)) {
+        ESP_LOGI(TAG, "✓ Fan State ON 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Fan State ON 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-4. Fan Speed Control
+    ESP_LOGI(TAG, "3-4. Fan Speed 설정 테스트");
+    totalTests++;
+    if (setFanSpeed(7)) {
+        ESP_LOGI(TAG, "✓ Fan Speed 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Fan Speed 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-5. Speaker Volume Control
+    ESP_LOGI(TAG, "3-5. Speaker Volume 설정 테스트");
+    totalTests++;
+    if (setSpeakerVolume(5)) {
+        ESP_LOGI(TAG, "✓ Speaker Volume 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Speaker Volume 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-6. Cooling Fan State
+    ESP_LOGI(TAG, "3-6. Cooling Fan State ON 테스트");
+    totalTests++;
+    if (setCoolingFanState(true)) {
+        ESP_LOGI(TAG, "✓ Cooling Fan State ON 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Cooling Fan State ON 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-7. Pose Detection Mode
+    ESP_LOGI(TAG, "3-7. Pose Detection Mode 설정 테스트");
+    totalTests++;
+    if (setPoseDetectionMode(true)) {
+        ESP_LOGI(TAG, "✓ Pose Detection Mode 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Pose Detection Mode 명령 전송 실패");
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    // ========================
+    // 4. 연속 명령 전송 테스트
+    // ========================
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "=== 연속 명령 전송 테스트 ===");
+    
+    ESP_LOGI(TAG, "4-1. 연속 5개 명령 전송 테스트 시작");
+    uint32_t consecutiveStartTime = millis();
+    
+    totalTests++;
+    bool consecutiveSuccess = true;
+    consecutiveSuccess &= setDeviceMode(DeviceMode::SLEEP);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    consecutiveSuccess &= requestSpeakerVolume();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    consecutiveSuccess &= setFanSpeed(3);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    consecutiveSuccess &= setCoolingFanLevel(2);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    consecutiveSuccess &= setDeviceMode(DeviceMode::WAITING);
+    
+    uint32_t consecutiveEndTime = millis();
+    uint32_t consecutiveElapsed = consecutiveEndTime - consecutiveStartTime;
+    
+    if (consecutiveSuccess) {
+        ESP_LOGI(TAG, "✓ 연속 5개 명령 전송 성공 (소요시간: %lums)", consecutiveElapsed);
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ 연속 5개 명령 전송 실패");
+    }
+    
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    
+    // =================
+    // 5. 테스트 결과 요약
+    // =================
+    uint32_t testEndTime = millis();
+    uint32_t totalElapsed = testEndTime - testStartTime;
+    
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "======================================================");
+    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 결과 요약 ===");
+    ESP_LOGI(TAG, "======================================================");
+    ESP_LOGI(TAG, "총 테스트 수: %d", totalTests);
+    ESP_LOGI(TAG, "성공한 테스트: %d", passedTests);
+    ESP_LOGI(TAG, "실패한 테스트: %d", totalTests - passedTests);
+    ESP_LOGI(TAG, "성공률: %.1f%%", (float)passedTests / totalTests * 100.0);
+    ESP_LOGI(TAG, "총 소요시간: %lu초", totalElapsed / 1000);
+    ESP_LOGI(TAG, "");
+    
+    if (passedTests == totalTests) {
+        ESP_LOGI(TAG, "🎉 모든 테스트가 성공했습니다!");
+    } else {
+        ESP_LOGW(TAG, "⚠️  일부 테스트가 실패했습니다. 로그를 확인하세요.");
+    }
+    
+    ESP_LOGI(TAG, "======================================================");
+    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 완료 ===");
+    ESP_LOGI(TAG, "======================================================");
 }

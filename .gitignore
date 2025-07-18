@@ -5,3 +5,20 @@
 .vscode/ipch
 
 test/
+
+# Python virtual environment
+venv/
+env/
+.env
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Test reports and logs
+*.json
+*.log
+*.html
+*.txt

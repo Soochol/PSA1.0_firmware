@@ -70,5 +70,6 @@
         "*.tpp": "cpp",
         "chrono": "cpp"
     },
-    "C_Cpp.errorSquiggles": "Disabled"
+    "C_Cpp.errorSquiggles": "Disabled",
+    "claudeCodeChat.permissions.yoloMode": false
 }

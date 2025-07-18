@@ -52,6 +52,54 @@ class ProtocolTester:
             checksum ^= byte
         return checksum & 0xFF
     
+    def parse_consecutive_responses(self, raw_response):
+        """연속된 응답을 개별 패킷으로 분리"""
+        packets = []
+        i = 0
+        
+        while i < len(raw_response):
+            if raw_response[i] == 0x02:  # STX 찾기
+                if i + 1 < len(raw_response):
+                    packet_len = raw_response[i + 1]  # LEN 필드
+                    
+                    # 패킷 길이가 유효한지 확인 (LEN은 STX와 LEN을 제외한 나머지 바이트 수)
+                    total_packet_size = packet_len + 2  # STX + LEN + (DIR + CMD + DATA + CHKSUM + ETX)
+                    
+                    if packet_len >= 4 and i + total_packet_size <= len(raw_response):
+                        packet = raw_response[i:i + total_packet_size]
+                        
+                        # ETX 확인 (패킷의 마지막 바이트)
+                        if packet[-1] == 0x03:
+                            packets.append(packet)
+                            self.log(f"    분리된 패킷: {packet.hex().upper()}")
+                        else:
+                            self.log(f"    경고: ETX가 없는 패킷 발견 at index {i}, 예상: 0x03, 실제: 0x{packet[-1]:02X}")
+                        
+                        i += total_packet_size
+                    else:
+                        self.log(f"    경고: 잘못된 패킷 길이 {packet_len} at index {i}, 필요: {total_packet_size}, 남은: {len(raw_response) - i}")
+                        i += 1
+                else:
+                    self.log(f"    경고: LEN 필드를 읽을 수 없음 at index {i}")
+                    break
+            else:
+                i += 1
+        
+        self.log(f"    총 {len(packets)}개 패킷 분리됨")
+        return packets
+    
+    def verify_packet_checksum(self, packet):
+        """패킷의 체크섬 검증"""
+        if len(packet) < 4:
+            return False
+        
+        # 체크섬 계산 (STX + LEN + DIR + CMD + DATA)
+        checksum_data = packet[:-2]  # 체크섬과 ETX 제외
+        calculated_checksum = self.calculate_checksum(checksum_data)
+        received_checksum = packet[-2]  # 끝에서 두 번째가 체크섬
+        
+        return calculated_checksum == received_checksum
+    
     def create_packet(self, command, data=None):
         """기본 패킷 생성"""
         packet = []
@@ -64,8 +112,8 @@ class ProtocolTester:
         packet_len = 4 + data_len  # DIR + CMD + CHKSUM + ETX + DATA
         packet.append(packet_len)
         
-        # DIR (0x02, STM -> ESP)
-        packet.append(0x02)
+        # DIR (MSG_REQUEST - STM initiating)
+        packet.append(0x20)
         
         # CMD
         packet.append(command)
@@ -74,7 +122,7 @@ class ProtocolTester:
         if data:
             packet.extend(data)
         
-        # CHECKSUM
+        # CHECKSUM (calculate from STM + LEN + DIR + CMD + DATA)
         checksum = self.calculate_checksum(packet)
         packet.append(checksum)
         
@@ -243,6 +291,174 @@ class ProtocolTester:
                 'responses': responses
             })
     
+    def test_consecutive_messages(self):
+        """연속 메시지 테스트 (STM→ESP 5개 메시지)"""
+        self.log("\n=== 연속 메시지 테스트 ===")
+        
+        # 5개의 서로 다른 메시지 준비
+        test_messages = [
+            {
+                'command': 0x70,
+                'data': [0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x10, 0x00, 0x20, 0x00, 0x30,
+                        0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x40, 0x00, 0x50, 0x00, 0x60,
+                        0x01, 0x00, 0x01, 0x00, 0x00, 0x19, 0x00, 0x1A, 0x00, 0x1B,
+                        0x00, 0x64, 0x00, 0xC8, 0x00, 0x64, 0x00, 0x00],
+                'description': 'STATUS: 센서 데이터 #1'
+            },
+            {
+                'command': 0x80,
+                'data': None,
+                'description': 'EVENT: 초기화 시작'
+            },
+            {
+                'command': 0x82,
+                'data': [2],  # FORCE_UP
+                'description': 'EVENT: 모드 변경 (FORCE_UP)'
+            },
+            {
+                'command': 0x90,
+                'data': [3],  # SD Card Failed
+                'description': 'ERROR: SD Card Failed'
+            },
+            {
+                'command': 0x70,
+                'data': [0x00, 0x0A, 0x00, 0x14, 0x00, 0x1E, 0x00, 0x64, 0x00, 0xC8, 0x01, 0x2C,
+                        0x00, 0x0F, 0x00, 0x19, 0x00, 0x23, 0x00, 0x96, 0x00, 0xFA, 0x01, 0x5E,
+                        0x01, 0x50, 0x01, 0x60, 0x00, 0x18, 0x00, 0x19, 0x00, 0x1A,
+                        0x00, 0x5F, 0x00, 0x96, 0x00, 0x62, 0x01, 0x01],
+                'description': 'STATUS: 센서 데이터 #2'
+            }
+        ]
+        
+        # 모든 패킷을 먼저 생성
+        packets = []
+        for msg in test_messages:
+            packet = self.create_packet(msg['command'], msg['data'])
+            packets.append((packet, msg['description']))
+        
+        self.log(f"→ 연속 메시지 전송 시작 (총 {len(packets)}개)")
+        
+        # 연속으로 패킷 전송 (간격 최소화)
+        start_time = time.time()
+        for i, (packet, desc) in enumerate(packets):
+            self.log(f"  [{i+1}/5] {desc}")
+            self.log(f"    패킷: {packet.hex().upper()}")
+            
+            # 패킷 전송
+            for byte in packet:
+                self.serial_conn.write(bytes([byte]))
+                time.sleep(0.001)  # 1ms 간격
+            self.serial_conn.flush()
+            
+            # 짧은 간격으로 다음 패킷 전송
+            time.sleep(0.05)  # 50ms 간격
+        
+        send_time = time.time() - start_time
+        self.log(f"→ 모든 패킷 전송 완료 (소요시간: {send_time:.3f}초)")
+        
+        # 응답 수집 (좀 더 길게 대기)
+        self.log("→ 응답 수집 중...")
+        time.sleep(2.0)  # 2초 대기
+        
+        all_raw_responses = []
+        
+        for i in range(15):  # 최대 15번 읽기 시도
+            if self.serial_conn.in_waiting > 0:
+                response = self.serial_conn.read(self.serial_conn.in_waiting)
+                if response:
+                    all_raw_responses.append(response)
+                    self.log(f"  Raw 응답 {len(all_raw_responses)}: {response.hex().upper()}")
+            time.sleep(0.1)
+        
+        # 모든 raw 응답을 하나로 합치기
+        combined_response = b''.join(all_raw_responses)
+        self.log(f"→ 합쳐진 응답: {combined_response.hex().upper()}")
+        
+        # 개별 패킷으로 분리
+        individual_packets = []
+        if combined_response:
+            self.log("→ 개별 패킷 분리 중...")
+            individual_packets = self.parse_consecutive_responses(combined_response)
+        
+        # 각 패킷 검증 및 분석
+        valid_packets = []
+        expected_commands = [0x70, 0x80, 0x82, 0x90, 0x70]  # 전송한 명령 순서
+        
+        for i, packet in enumerate(individual_packets):
+            self.log(f"→ 패킷 {i+1} 검증 중...")
+            
+            # 체크섬 검증
+            if self.verify_packet_checksum(packet):
+                self.log(f"  ✓ 체크섬 검증 성공")
+            else:
+                self.log(f"  ✗ 체크섬 검증 실패")
+                continue
+            
+            # 응답 명령 확인 (DIR=0x20, CMD=원본명령)
+            if len(packet) >= 4:
+                direction = packet[2]
+                command = packet[3]
+                
+                if direction == 0x02:  # MSG_RESPONSE - ESP ACK
+                    self.log(f"  ✓ ESP→STM 응답 확인: 명령 0x{command:02X}")
+                    
+                    # 예상 명령과 매칭 확인
+                    if i < len(expected_commands) and command == expected_commands[i]:
+                        self.log(f"  ✓ 명령-응답 매칭 성공: {i+1}번째 명령")
+                        valid_packets.append(packet)
+                    else:
+                        self.log(f"  ⚠️ 명령-응답 순서 불일치: 예상 0x{expected_commands[i] if i < len(expected_commands) else 0:02X}, 실제 0x{command:02X}")
+                        valid_packets.append(packet)  # 여전히 유효한 패킷으로 처리
+                else:
+                    self.log(f"  ✗ 잘못된 응답 방향: 0x{direction:02X}")
+            else:
+                self.log(f"  ✗ 패킷이 너무 짧음: {len(packet)} bytes")
+        
+        # 결과 분석
+        success = len(valid_packets) > 0
+        response_count = len(valid_packets)
+        
+        # 최종 결과 요약
+        success_rate = (response_count / len(packets)) * 100 if len(packets) > 0 else 0
+        
+        self.log(f"→ 연속 메시지 테스트 완료:")
+        self.log(f"  - 전송 메시지: {len(packets)}개")
+        self.log(f"  - 수신 응답: {response_count}개")
+        self.log(f"  - 응답 성공률: {success_rate:.1f}%")
+        self.log(f"  - 전송 시간: {send_time:.3f}초")
+        self.log(f"  - 평균 전송시간: {send_time/len(packets):.3f}초/메시지")
+        
+        if response_count == len(packets):
+            self.log(f"  ✓ 모든 명령에 대한 ACK 수신 완료!")
+        elif response_count > 0:
+            self.log(f"  ⚠️ 일부 ACK 누락됨 ({len(packets) - response_count}개)")
+        else:
+            self.log(f"  ✗ ACK 응답을 받지 못했습니다")
+        
+        # 개별 패킷 정보를 문자열로 변환
+        packet_info = []
+        for i, packet in enumerate(valid_packets):
+            packet_info.append({
+                'index': i + 1,
+                'hex': packet.hex().upper(),
+                'command': f"0x{packet[3]:02X}" if len(packet) >= 4 else "Unknown"
+            })
+        
+        self.test_results.append({
+            'test': 'Consecutive Messages',
+            'description': f'연속 {len(packets)}개 메시지 전송',
+            'success': success,
+            'responses': packet_info,
+            'stats': {
+                'sent_messages': len(packets),
+                'received_responses': response_count,
+                'success_rate': success_rate,
+                'total_time': send_time,
+                'avg_transmission_time': send_time/len(packets),
+                'raw_response_hex': combined_response.hex().upper() if combined_response else ""
+            }
+        })
+    
     def test_invalid_messages(self):
         """잘못된 메시지 테스트"""
         self.log("\n=== 잘못된 메시지 테스트 ===")
@@ -323,6 +539,7 @@ class ProtocolTester:
             self.test_status_message()
             self.test_event_messages()
             self.test_error_messages()
+            self.test_consecutive_messages()  # 연속 메시지 테스트 추가
             self.test_invalid_messages()
             
             # 리포트 생성

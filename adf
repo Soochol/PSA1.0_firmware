@@ -1,0 +1,51 @@
+[33mcommit 738dfff4329e12306144eb7f50713cf407831de2[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Soochol <blessp@naver.com>
+Date:   Wed Jul 16 22:45:00 2025 +0900
+
+    Remove venv folder from git tracking
+
+[33mcommit d1722f246b69f95e4079dd32e976280f2cbf9382[m
+Author: Soochol <blessp@naver.com>
+Date:   Wed Jul 16 22:26:17 2025 +0900
+
+    Standardize serial port usage and organize test structure
+    
+    - Standardize serial port definitions in globals.h
+      - Replace mixed naming (USBSerial/ProtocolSerial) with clear hardware-specific names
+      - Define DebugSerial as conditional mapping based on STM hardware presence
+      - Use STMSerial for UART2, LTESerial for UART1
+    
+    - Update all source files to use standardized serial names
+      - main.cpp: Replace USBSerial with DebugSerial
+      - uartMaster.cpp: Remove aliases, use direct STMSerial
+      - type1scMqttLte.cpp: Change M1Serial to LTESerial, use Arduino Serial1
+    
+    - Remove duplicate serial definitions
+      - Remove conflicting DebugSerial definition in type1scMqttLte.h
+      - Fix compilation errors from duplicate Serial1 definitions
+    
+    - Organize test structure
+      - Create tests/ directory for protocol testing
+      - Keep only essential test files: comprehensive_protocol_test.py, run_all_tests.py
+      - Add comprehensive test documentation
+      - Remove redundant test files and generated reports
+    
+    - Fix compilation and verify system integrity
+      - All files compile successfully
+      - Memory usage: RAM 23.9%, Flash 10.0%
+      - Maintain existing functionality while improving code clarity
+    
+    🤖 Generated with [Claude Code](https://claude.ai/code)
+    
+    Co-Authored-By: Claude <noreply@anthropic.com>
+
+[33mcommit aad6ed7783a00487c67605f8126759df44b02e96[m
+Author: Soochol <blessp@naver.com>
+Date:   Wed Jul 16 08:45:42 2025 +0900
+
+    Initial commit: PSA1.0 firmware implementation
+    
+      - Add UART communication protocol
+      - Implement TinyML integration framework
+      - Add sensor data processing
+      - Include device mode control functions

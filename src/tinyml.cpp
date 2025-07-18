@@ -1,5 +1,7 @@
 #include <tinyml.h>
 
+static const char TAG[] = __FILE__;
+
 Eloquent::TF::Sequential<TF_NUM_OPS, ARENA_SIZE> tf;
 
 // 20250311 shoulder classification model 0.89 (with augmentations)
@@ -15,18 +17,11 @@ float negative3[270] = { -1.9703, 0.4221, 0.8061, -0.4066, 0.5887, -0.8795, 0.83
 void predictSample(const char *classLabel, float *input, uint8_t expectedOutput) {
     // classify class 0
     if (!tf.predict(input).isOk()) {
-        extern HardwareSerial DebugSerial;
-        DebugSerial.println(tf.exception.toString());
+        ESP_LOGI(TAG, "%s", tf.exception.toString().c_str());
         return;
     }
 
-    extern HardwareSerial DebugSerial;
-    DebugSerial.print("Predicting sample of ");
-    DebugSerial.print(classLabel);
-    DebugSerial.print(": expcted id=");
-    DebugSerial.print(expectedOutput);
-    DebugSerial.print(", predicted=");
-    DebugSerial.println(tf.classification);
+    ESP_LOGI(TAG, "Predicting sample of %s: expected id=%d, predicted=%d", classLabel, expectedOutput, tf.classification);
 
 }
 
@@ -40,9 +35,7 @@ void tinyMLExample() {
     predictSample("negative3", negative3, 0);
 
     // how long does it take to run a single prediction?
-    DebugSerial.print("It takes ");
-    DebugSerial.print(tf.benchmark.microseconds());
-    DebugSerial.println("us for a single prediction");
+    ESP_LOGI(TAG, "It takes %d us for a single prediction", tf.benchmark.microseconds());
 
     delay(1000);
 }
@@ -51,21 +44,21 @@ void tinyMLExample() {
 void initTinyML() {
     // Serial.begin(115200);
     // delay(3000);
-    DebugSerial.println("__TENSORFLOW__");
+    ESP_LOGI(TAG, "__TENSORFLOW__");
 
     // configure input/output
     // (not mandatory if you generated the .h model
     // using the eloquent_tensorflow Python package)
     tf.setNumInputs(TF_NUM_INPUTS);
-    DebugSerial.println("__INPUTS SET__");
+    ESP_LOGI(TAG, "__INPUTS SET__");
     tf.setNumOutputs(TF_NUM_OUTPUTS);
-    DebugSerial.println("__OUTPUTS SET__");
+    ESP_LOGI(TAG, "__OUTPUTS SET__");
 
     registerNetworkOps(tf);
-    DebugSerial.println("__NETWORKOPS SET__");
+    ESP_LOGI(TAG, "__NETWORKOPS SET__");
 
     while (!tf.begin(tfModel).isOk()) {
-        DebugSerial.println(tf.exception.toString());
+        ESP_LOGI(TAG, "%s", tf.exception.toString().c_str());
         delay(1000);
     }
 
@@ -166,24 +159,20 @@ uint8_t tinyMLInference(tinyMLDataClass predictionInput) {
 #endif
 
 #ifdef PRINT_PREDICTION_DATA
-    extern HardwareSerial DebugSerial;
-    DebugSerial.println("------");
+    ESP_LOGI(TAG, "------");
     for (int j=0; j<TINYML_BUFFER_LEN*9; j++) {
-        DebugSerial.printf("%f, ", flattenedInput[j]);
+        ESP_LOGI(TAG, "%f, ", flattenedInput[j]);
     }
-    DebugSerial.println("------");
+    ESP_LOGI(TAG, "------");
 #endif
 
     if (!tf.predict(flattenedInput).isOk()) {
-        extern HardwareSerial DebugSerial;
-        DebugSerial.printf("SOMETHING WRONG WITH MODEL INFERENCE");
-        DebugSerial.println(tf.exception.toString());
+        ESP_LOGI(TAG, "SOMETHING WRONG WITH MODEL INFERENCE");
+        ESP_LOGI(TAG, "%s", tf.exception.toString().c_str());
         return 0;
     }
     prediction = tf.classification;
-    extern HardwareSerial DebugSerial;
-    DebugSerial.print("predicted=");
-    DebugSerial.println(tf.classification);
+    ESP_LOGI(TAG, "predicted=%d", tf.classification);
 
     return prediction;
 }
