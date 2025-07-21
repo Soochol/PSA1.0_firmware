@@ -59,7 +59,8 @@ enum class DeviceMode : uint8_t {
     FORCE_UP = 2,
     FORCE_ON = 3,
     FORCE_DOWN = 4,
-    ERROR = 5
+    IMU = 5,
+    ERROR = 6
 };
 
 // Command state management for ESP->STM communication
@@ -270,7 +271,7 @@ bool setUpperTemperatureLimit(float limitTemp);
 
 bool setDeviceMode(DeviceMode mode);
 bool setFanState(bool enabled);
-bool setFanSpeed(uint8_t speed_0_to_10);
+bool setFanSpeed(uint8_t speed_0_to_3);
 bool setCoolingFanState(bool enabled);
 bool setCoolingFanLevel(uint8_t level);
 bool setHeatPadState(bool enabled);  // DEPRECATED - ctrlHeatPadOn not supported

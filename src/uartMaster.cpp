@@ -353,9 +353,9 @@ void handleStatusMessage() {
 void handleModeChangeEvent() {
     if (currentMessage.dataLength > 0) {
         uint8_t modeValue = currentMessage.data[0];
-        if (modeValue <= 5) {  // Valid mode range: 0-5
+        if (modeValue <= 6) {  // Valid mode range: 0-6
             currentDeviceMode = static_cast<DeviceMode>(modeValue);
-            const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
+            const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "ERROR"};
             ESP_LOGI(TAG, "Mode: %s (%d)", modeNames[modeValue], modeValue);
         } else {
             ESP_LOGW(TAG, "Invalid mode value received: %d", modeValue);
@@ -1300,7 +1300,7 @@ bool setDeviceMode(DeviceMode mode) {
     
     bool success = sendCommandAsync(ctrlMode, data, 1);
     if (success) {
-        const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
+        const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "ERROR"};
         ESP_LOGI(TAG, "Device mode set to %s - Command: 0x%02X (%s)", 
                  modeNames[static_cast<int>(mode)], ctrlMode, getCommandName(ctrlMode));
     }
@@ -1318,17 +1318,17 @@ bool setFanState(bool enabled) {
     return success;
 }
 
-bool setFanSpeed(uint8_t speed_0_to_10) {
-    if (speed_0_to_10 > 10) {
-        ESP_LOGW(TAG, "Invalid fan speed: %d (max: 10)", speed_0_to_10);
+bool setFanSpeed(uint8_t speed_0_to_3) {
+    if (speed_0_to_3 > 3) {
+        ESP_LOGW(TAG, "Invalid fan speed: %d (max: 3)", speed_0_to_3);
         return false;
     }
     
-    byte data[] = {speed_0_to_10};
+    byte data[] = {speed_0_to_3};
     
     bool success = sendCommandAsync(ctrlFanPWM, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Fan speed set to %d", speed_0_to_10);
+        ESP_LOGI(TAG, "Fan speed set to %d", speed_0_to_3);
     }
     return success;
 }
@@ -1717,8 +1717,19 @@ void testESPtoSTMCommunication() {
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
     
-    // 3-3. Fan State Control
-    ESP_LOGI(TAG, "3-3. Fan State ON 테스트");
+    // 3-3. Device Mode - IMU
+    ESP_LOGI(TAG, "3-3. Device Mode → IMU 테스트");
+    totalTests++;
+    if (setDeviceMode(DeviceMode::IMU)) {
+        ESP_LOGI(TAG, "✓ Device Mode IMU 명령 전송 성공");
+        passedTests++;
+    } else {
+        ESP_LOGE(TAG, "✗ Device Mode IMU 명령 전송 실패");
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    
+    // 3-4. Fan State Control
+    ESP_LOGI(TAG, "3-4. Fan State ON 테스트");
     totalTests++;
     if (setFanState(true)) {
         ESP_LOGI(TAG, "✓ Fan State ON 명령 전송 성공");
@@ -1728,10 +1739,10 @@ void testESPtoSTMCommunication() {
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
     
-    // 3-4. Fan Speed Control
-    ESP_LOGI(TAG, "3-4. Fan Speed 설정 테스트");
+    // 3-5. Fan Speed Control
+    ESP_LOGI(TAG, "3-5. Fan Speed 설정 테스트");
     totalTests++;
-    if (setFanSpeed(7)) {
+    if (setFanSpeed(3)) {
         ESP_LOGI(TAG, "✓ Fan Speed 명령 전송 성공");
         passedTests++;
     } else {
@@ -1739,8 +1750,8 @@ void testESPtoSTMCommunication() {
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
     
-    // 3-5. Speaker Volume Control
-    ESP_LOGI(TAG, "3-5. Speaker Volume 설정 테스트");
+    // 3-6. Speaker Volume Control
+    ESP_LOGI(TAG, "3-6. Speaker Volume 설정 테스트");
     totalTests++;
     if (setSpeakerVolume(5)) {
         ESP_LOGI(TAG, "✓ Speaker Volume 명령 전송 성공");
@@ -1750,8 +1761,8 @@ void testESPtoSTMCommunication() {
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
     
-    // 3-6. Cooling Fan State
-    ESP_LOGI(TAG, "3-6. Cooling Fan State ON 테스트");
+    // 3-7. Cooling Fan State
+    ESP_LOGI(TAG, "3-7. Cooling Fan State ON 테스트");
     totalTests++;
     if (setCoolingFanState(true)) {
         ESP_LOGI(TAG, "✓ Cooling Fan State ON 명령 전송 성공");
@@ -1761,8 +1772,8 @@ void testESPtoSTMCommunication() {
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
     
-    // 3-7. Pose Detection Mode
-    ESP_LOGI(TAG, "3-7. Pose Detection Mode 설정 테스트");
+    // 3-8. Pose Detection Mode
+    ESP_LOGI(TAG, "3-8. Pose Detection Mode 설정 테스트");
     totalTests++;
     if (setPoseDetectionMode(true)) {
         ESP_LOGI(TAG, "✓ Pose Detection Mode 명령 전송 성공");
