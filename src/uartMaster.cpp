@@ -1,50 +1,96 @@
+/**
+ * @file uartMaster.cpp
+ * @brief Implementation of ESP32-STM32 UART Communication Protocol
+ * 
+ * This file implements the complete UART communication system between ESP32 and STM32
+ * microcontrollers for the PSA (Postural Stability Assistant) device. It provides
+ * bidirectional communication with asynchronous command/response handling, message
+ * parsing, error recovery, and system health monitoring.
+ * 
+ * Key Implementation Features:
+ * - State machine-based message parser for reliable frame synchronization
+ * - Asynchronous command queue with timeout and retry mechanism
+ * - Real-time sensor data processing and TinyML integration
+ * - System health monitoring with automatic error recovery
+ * - Temperature and fan control with safety limits
+ * - Comprehensive logging for debugging and diagnostics
+ * 
+ * Communication Flow:
+ * 1. ESP32 sends commands to STM32 via sendCommandAsync()
+ * 2. STM32 responds with data payload (success) or silence (failure)
+ * 3. Message parser processes incoming bytes using state machine
+ * 4. Sensor data is continuously parsed and stored for TinyML processing
+ * 5. System monitors communication health and handles errors
+ * 
+ * Protocol Format: [STM][LEN][DIR][CMD][DATA...][CHKSUM][ETX]
+ */
+
 #include "uartMaster.h"
 
 static const char TAG[] = __FILE__;
 
-// ===== UART Configuration =====
-// UART0 (Serial): PC Python 테스트 프로토콜 통신용
-// ESP_LOG: 디버깅 로그 출력용
-
-// ESP_LOG handles debug output automatically
-// STMSerial now directly uses the standardized serial definition from globals.h
-
-// Global variables for message parsing
-static MessageState currentState = MessageState::WAITING_START;
-static ProtocolMessage currentMessage = {};
-static uint8_t messageBuffer[USART_MESSAGE_MAXIMUM_LENGTH];
-static size_t bufferIndex = 0;
-static size_t expectedDataLength = 0;
-
-// Global variables for sensor data storage
-static bool sensorDataAvailable = false;
-
-// Global variables for device state tracking
-static DeviceMode currentDeviceMode = DeviceMode::WAITING;  // Default mode
-static uint8_t lastErrorCode = 0;  // Last error code received (0 = no error)
-
-// Global variables for TinyML processing
-static uint8_t tinyMLInferenceResult = 0;
-static uint8_t finalResult = 0;
-
-// Global variables for multi-command state management (ESP→STM)
-static PendingCommand pendingCommands[MAX_PENDING_COMMANDS];
-static uint8_t nextCommandId = 1;
-
-// Global variables for system state tracking
-static SystemState currentSystemState = SystemState::NORMAL;
-static uint32_t lastCommunicationError = 0;
-static uint8_t consecutiveTimeouts = 0;
-
-// Variables for message construction
-byte LEN;
-uint8_t CHKSUM;
-
 // =============================================================================
-// Multi-Command Management Helper Functions
+// UART Configuration and Global Variables
 // =============================================================================
 
-// Find empty slot in pending commands array
+// UART Configuration:
+// - UART0 (Serial): PC Python test protocol communication
+// - STMSerial: ESP32-STM32 communication (defined in globals.h)
+// - ESP_LOG: Debug output (handled automatically)
+
+// -----------------------------------------------
+// Message Parsing State Variables
+// -----------------------------------------------
+static MessageState currentState = MessageState::WAITING_START;    // Parser state machine current state
+static ProtocolMessage currentMessage = {};                        // Currently parsed message buffer
+static uint8_t messageBuffer[USART_MESSAGE_MAXIMUM_LENGTH];       // Raw message byte buffer
+static size_t bufferIndex = 0;                                    // Current position in message buffer
+static size_t expectedDataLength = 0;                             // Expected data payload length
+
+// -----------------------------------------------
+// Sensor Data Management
+// -----------------------------------------------
+static bool sensorDataAvailable = false;                          // Flag indicating new sensor data ready
+
+// -----------------------------------------------
+// Device State Tracking
+// -----------------------------------------------
+static DeviceMode currentDeviceMode = DeviceMode::WAITING;        // Current device operating mode (default: WAITING)
+static uint8_t lastErrorCode = 0;                                 // Last error code received from STM (0 = no error)
+
+// -----------------------------------------------
+// TinyML Processing Variables
+// -----------------------------------------------
+static uint8_t tinyMLInferenceResult = 0;                         // Result from TinyML pose detection inference
+static uint8_t finalResult = 0;                                   // Final processed result for decision making
+
+// -----------------------------------------------
+// Asynchronous Command Management (ESP→STM)
+// -----------------------------------------------
+static PendingCommand pendingCommands[MAX_PENDING_COMMANDS];       // Queue of pending ESP→STM commands
+static uint8_t nextCommandId = 1;                                 // Next command ID for tracking (unused currently)
+
+// -----------------------------------------------
+// System Health and Error Tracking
+// -----------------------------------------------
+static SystemState currentSystemState = SystemState::NORMAL;      // Overall system health state
+static uint32_t lastCommunicationError = 0;                       // Timestamp of last communication error
+static uint8_t consecutiveTimeouts = 0;                           // Count of consecutive command timeouts
+
+// -----------------------------------------------
+// Message Construction Working Variables
+// -----------------------------------------------
+byte LEN;                                                          // Message length field (working variable)
+uint8_t CHKSUM;                                                   // Checksum field (working variable)
+
+// =============================================================================
+// Helper Functions for Command Management
+// =============================================================================
+
+/**
+ * @brief Find empty slot in pending commands array
+ * @return Index of empty slot, or -1 if no slots available
+ */
 static int findEmptySlot() {
     for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
         if (pendingCommands[i].command == 0) {
@@ -54,7 +100,11 @@ static int findEmptySlot() {
     return -1; // No empty slot found
 }
 
-// Find command slot by command code
+/**
+ * @brief Find command slot by command code
+ * @param command Command code to search for
+ * @return Index of command slot, or -1 if not found
+ */
 static int findCommandSlot(uint8_t command) {
     for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
         if (pendingCommands[i].command == command && 
@@ -69,6 +119,12 @@ static int findCommandSlot(uint8_t command) {
 // Core Protocol Functions
 // =============================================================================
 
+/**
+ * @brief Calculate XOR checksum for protocol message verification
+ * @param data Message data including STM, LEN, DIR, CMD, and DATA fields
+ * @param length Total message length
+ * @return Calculated XOR checksum
+ */
 uint8_t calculateChecksum(const byte* data, size_t length) {
     // Accurate checksum calculation according to protocol document
     // XOR of STM + LEN + DIR + CMD + DATA, initial value: A5h
@@ -143,12 +199,19 @@ void sendAckResponse(uint8_t receivedCommand) {
     }
 }
 
-void nackResponse() {
-    // NACK is not defined in protocol - no response sent (silence = NACK)
-    ESP_LOGW(TAG, "NACK: No response sent as per protocol");
-}
 
-// Stack-based message construction function - improved efficiency
+/**
+ * @brief Construct complete protocol message in provided buffer
+ * 
+ * Builds a complete UART protocol message with proper framing:
+ * [STM][LEN][DIR][CMD][DATA...][CHKSUM][ETX]
+ * 
+ * @param buffer Output buffer for constructed message
+ * @param command Command code to send
+ * @param data Optional payload data
+ * @param dataLen Length of payload data
+ * @return Total message length, or 0 on error
+ */
 size_t buildMessage(uint8_t* buffer, byte command, const byte* data, size_t dataLen) {
     if (!buffer) return 0;  // Safety check
     
@@ -223,7 +286,11 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
 // Message Processing Engine
 // =============================================================================
 
-// State machine based message parser
+/**
+ * @brief State machine-based message parser for incoming UART bytes
+ * @param byte Incoming byte from UART
+ * @return true if complete message parsed, false if still parsing
+ */
 bool parseIncomingByte(uint8_t byte) {
     switch (currentState) {
         case MessageState::WAITING_START:
@@ -357,6 +424,40 @@ void handleModeChangeEvent() {
             currentDeviceMode = static_cast<DeviceMode>(modeValue);
             const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "ERROR"};
             ESP_LOGI(TAG, "Mode: %s (%d)", modeNames[modeValue], modeValue);
+            
+            switch (currentDeviceMode) {
+                case DeviceMode::SLEEP:
+                    // TODO: Implement SLEEP mode handling
+                    break;
+                    
+                case DeviceMode::WAITING:
+                    // TODO: Implement WAITING mode handling
+                    break;
+                    
+                case DeviceMode::FORCE_UP:
+                    // TODO: Implement FORCE_UP mode handling
+                    break;
+                    
+                case DeviceMode::FORCE_ON:
+                    // TODO: Implement FORCE_ON mode handling
+                    break;
+                    
+                case DeviceMode::FORCE_DOWN:
+                    // TODO: Implement FORCE_DOWN mode handling
+                    break;
+                    
+                case DeviceMode::IMU:
+                    // TODO: Implement IMU mode handling
+                    break;
+                    
+                case DeviceMode::ERROR:
+                    // TODO: Implement ERROR mode handling
+                    break;
+                    
+                default:
+                    ESP_LOGW(TAG, "Unknown mode: %d", modeValue);
+                    break;
+            }
         } else {
             ESP_LOGW(TAG, "Invalid mode value received: %d", modeValue);
         }
@@ -368,7 +469,7 @@ void handleModeChangeEvent() {
 void handleEventMessage() {
     switch (currentMessage.command) {
         case evtInitStart:   // 0x80
-            ESP_LOGI(TAG, "STM init started");
+            ESP_LOGI(TAG, "STM init started");          
             break;
         case evtInitResult:  // 0x81
             ESP_LOGI(TAG, "STM init complete");
@@ -421,7 +522,23 @@ void handleErrorMessage() {
 }
 
 
-// Sensor data parsing function (modified according to protocol document)
+/**
+ * @brief Parse incoming sensor data from STM32 status messages
+ * 
+ * This algorithm extracts all sensor readings from the binary data payload
+ * received in STM status messages (0x70). The data is packed in a specific
+ * format with 16-bit values for most sensors.
+ * 
+ * Data Format (total ~34 bytes):
+ * - IMU data: Left gyro (6), Left accel (6), Right gyro (6), Right accel (6)
+ * - Pressure: Left (2), Right (2)
+ * - Temperature: Outside (2), Board (2), Actuator (2)
+ * - Other: Actuator displacement (2), Object distance (2), Battery (2)
+ * - Events: Left IMU event (1), Right IMU event (1)
+ * 
+ * @param data Binary sensor data payload
+ * @param length Length of data payload
+ */
 void parseSensorData(const uint8_t* data, size_t length) {
     if (!data || length < SENSOR_DATA_MIN_LENGTH) {
         ESP_LOGW(TAG, "Insufficient sensor data length: %d (minimum: %d)", length, SENSOR_DATA_MIN_LENGTH);
@@ -523,6 +640,24 @@ void parseSensorData(const uint8_t* data, size_t length) {
     }
 }
 
+/**
+ * @brief Main UART communication handler task
+ * 
+ * This is the core message processing loop that handles all incoming UART data
+ * from the STM32. It implements the complete message reception, parsing, validation,
+ * and response handling algorithm.
+ * 
+ * Algorithm Flow:
+ * 1. Read incoming bytes from UART buffer
+ * 2. Feed bytes to state machine parser (parseIncomingByte)
+ * 3. When complete message received, validate frame and checksum
+ * 4. Classify message type and route to appropriate handler
+ * 5. Process sensor data and update system state
+ * 6. Send acknowledgments as required by protocol
+ * 7. Handle timeouts and error recovery
+ * 
+ * @param pvParameters FreeRTOS task parameters (unused)
+ */
 void usartMasterHandler(void *pvParameters) {
     static bool testExecuted = false;
     static uint32_t startTime = xTaskGetTickCount();
@@ -548,23 +683,67 @@ void usartMasterHandler(void *pvParameters) {
             
             // State machine based parsing
             if (parseIncomingByte(incomingByte)) {
-                // Message complete - create hex dump and log with command symbol
-                char hexDump[256] = {0};
-                for (size_t i = 0; i < bufferIndex && i < 32; i++) {
+                // Message complete - create hex dump with proper length calculation
+                size_t expectedTotalLength = currentMessage.length + 2; // +2 for STM and LEN bytes
+                size_t actualDisplayLength = (bufferIndex < expectedTotalLength) ? bufferIndex : expectedTotalLength;
+                
+                char hexDump[512] = {0};
+                for (size_t i = 0; i < actualDisplayLength && i < 64; i++) {
                     snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
                              "%02X ", messageBuffer[i]);
                 }
                 
+                // Show extra bytes if any
+                if (bufferIndex > expectedTotalLength) {
+                    snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "| ");
+                    for (size_t i = expectedTotalLength; i < bufferIndex && i < 64; i++) {
+                        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
+                                 "%02X ", messageBuffer[i]);
+                    }
+                }
+                
                 // Single line log with packet and command symbol
                 ESP_LOGI(TAG, "[STM→ESP] %s→ %s", hexDump, getCommandName(currentMessage.command));
+                ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
+                         currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
                 
-                // Message complete, verify checksum
-                if (!currentMessage.isValid()) {
-                    ESP_LOGW(TAG, "[STM-ERR] Invalid format: STM=0x%02X (expect 0x%02X), DIR=0x%02X (expect 0x%02X), ETX=0x%02X (expect 0x%02X)", 
-                             currentMessage.stm, STM, currentMessage.direction, MSG_REQUEST, 
+                // Enhanced protocol validation with command-type-specific direction checking
+                const char* validationError = nullptr;
+                if (!currentMessage.isValidStrictWithCommandCheck(&validationError)) {
+                    ESP_LOGW(TAG, "[STM-ERR] Protocol validation failed: %s", validationError);
+                    ESP_LOGW(TAG, "[STM-ERR] Frame details: STM=0x%02X (expect 0x%02X), DIR=0x%02X, CMD=0x%02X, ETX=0x%02X (expect 0x%02X)", 
+                             currentMessage.stm, STM, currentMessage.direction, currentMessage.command,
                              currentMessage.etx, ETX);
+                    
+                    // Specific STM32 protocol error detection
+                    if (currentMessage.etx != ETX) {
+                        ESP_LOGE(TAG, "[STM32-PROTOCOL-ERROR] ETX mismatch - STM32 firmware should send 0x%02X instead of 0x%02X", 
+                                 ETX, currentMessage.etx);
+                    }
+                    
                     resetParser();
                     continue;
+                }
+                
+                // Message length validation
+                if (bufferIndex != expectedTotalLength) {
+                    ESP_LOGW(TAG, "[STM32-PROTOCOL-ERROR] Length mismatch: received %zu bytes, expected %zu bytes (LEN=0x%02X)", 
+                             bufferIndex, expectedTotalLength, currentMessage.length);
+                    ESP_LOGW(TAG, "[STM32-FIX-NEEDED] STM32 should send exactly %zu bytes per message", expectedTotalLength);
+                    
+                    if (bufferIndex > expectedTotalLength) {
+                        size_t extraBytes = bufferIndex - expectedTotalLength;
+                        ESP_LOGE(TAG, "[STM32-PROTOCOL-ERROR] STM32 sent %zu extra bytes - check for buffer overflow or padding", extraBytes);
+                        ESP_LOGE(TAG, "[STM32-DEV-GUIDE] Fix: Ensure STM32 UART transmission stops after ETX byte");
+                    }
+                }
+                
+                // Additional STM32 protocol compliance check
+                if (currentMessage.etx != ETX) {
+                    ESP_LOGE(TAG, "[STM32-DEV-GUIDE] STM32 Protocol Fix Required:");
+                    ESP_LOGE(TAG, "[STM32-DEV-GUIDE]   Current ETX: 0x%02X", currentMessage.etx);
+                    ESP_LOGE(TAG, "[STM32-DEV-GUIDE]   Expected ETX: 0x%02X", ETX);
+                    ESP_LOGE(TAG, "[STM32-DEV-GUIDE]   Action: Set ETX = 0x03 in STM32 message construction");
                 }
                 
                 if (!checkMessage(messageBuffer, bufferIndex)) {
@@ -577,7 +756,7 @@ void usartMasterHandler(void *pvParameters) {
                 
                 // Handle according to message type and command classification
                 if (currentMessage.direction == MSG_REQUEST) {
-                    // Classify and process message by command type
+                    // STM spontaneous messages (STATUS, EVENT, ERROR)
                     CommandType cmdType = currentMessage.getCommandType();
                     
                     switch (cmdType) {
@@ -596,28 +775,34 @@ void usartMasterHandler(void *pvParameters) {
                             handleErrorMessage();
                             break;
                             
-                        case CommandType::INIT:        // 0x1X - ESP→STM command ACK
-                            // ESP→STM INIT command ACK (only if we're expecting it)
+                        default:
+                            ESP_LOGW(TAG, "Unknown spontaneous command: 0x%02X", currentMessage.command);
+                            break;
+                    }
+                } else if (currentMessage.direction == MSG_RESPONSE) {
+                    // STM ACK/response messages for ESP→STM commands
+                    CommandType cmdType = currentMessage.getCommandType();
+                    
+                    switch (cmdType) {
+                        case CommandType::INIT:        // 0x1X - ESP→STM INIT command ACK
                             handleInitResponse();
                             break;
                             
-                        case CommandType::REQUEST:     // 0x3X - ESP→STM command response
-                            // ESP→STM REQUEST command response with data (only if we're expecting it)
+                        case CommandType::REQUEST:     // 0x3X - ESP→STM REQUEST command response
                             handleRequestResponse();
                             break;
                             
-                        case CommandType::CONTROL:     // 0x5X - ESP→STM command ACK
-                            // ESP→STM CONTROL command ACK (only if we're expecting it)
+                        case CommandType::CONTROL:     // 0x5X - ESP→STM CONTROL command ACK
                             handleControlResponse();
                             break;
                             
                         default:
-                            ESP_LOGW(TAG, "Unknown CMD: 0x%02X", currentMessage.command);
+                            ESP_LOGW(TAG, "Unknown response command: 0x%02X", currentMessage.command);
                             break;
                     }
                 } else {
-                    ESP_LOGW(TAG, "[STM-ERR] Invalid direction: 0x%02X (expected: 0x%02X)", 
-                             currentMessage.direction, MSG_REQUEST);
+                    ESP_LOGW(TAG, "[STM-ERR] Invalid direction: 0x%02X (expected: 0x%02X or 0x%02X)", 
+                             currentMessage.direction, MSG_REQUEST, MSG_RESPONSE);
                 }
                 
                 resetParser();
