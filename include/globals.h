@@ -397,6 +397,9 @@ typedef struct {
     uint16_t waitingTimeout;
     uint8_t poseDetectionDelay;
     uint8_t objectDetectionDelay;
+    uint8_t gyroActiveAngle;
+    uint8_t gyroRelativeAngle;
+    uint8_t currentModeValue;
 } SystemConfig_t;
 
 class biosigDataClass {

@@ -13,6 +13,7 @@
  * - Temperature and fan control system
  * - System health monitoring and error recovery
  * - TinyML integration for pose detection
+ * - Korean protocol specification compliance with gyro angle and mode controls
  */
 
 #ifndef _ESP_USART_MASTER_H
@@ -39,17 +40,21 @@
 // Command Codes by Category
 // =============================================================================
 
-// INIT Commands (0x10-0x1F) - Initialize device parameters
+// INIT Commands (0x10-0x21) - Initialize device parameters (Korean Protocol)
 #define initTempSleep   0x10    // Set sleep mode temperature
 #define initTempWaiting 0x11    // Set waiting mode temperature
 #define initTempForceUp 0x12    // Set force-up mode temperature
 #define initTempHeatPad 0x13    // Set heat pad temperature
-// #define initPWMFan      0x14 // (Reserved)
+#define initTempLimit   0x14    // Set upper temperature limit - DEPRECATED
 #define initPWMCoolFan  0x15    // Set cooling fan PWM level
 #define initTout        0x16    // Set timeout values
-#define initDelay       0x17    // Set detection delay values
+#define initSpk         0x17    // Set speaker volume
+#define initDelay       0x18    // Set detection delay values (moved from 0x17)
+#define initGyroAct     0x19    // Set heating angle (IMU active angle)
+#define initGyroRel     0x20    // Set cooling angle (IMU relative angle)
+#define initMode        0x21    // Set mode change (0: AI mode, 1: IMU mode)
 
-// REQUEST Commands (0x30-0x3F) - Query current parameter values
+// REQUEST Commands (0x30-0x41) - Query current parameter values
 #define reqTempSleep    0x30    // Get sleep mode temperature
 #define reqTempWaiting  0x31    // Get waiting mode temperature
 #define reqTempForceUp  0x32    // Get force-up mode temperature
@@ -59,8 +64,11 @@
 #define reqTimeout      0x36    // Get timeout values
 #define reqSpk          0x37    // Get speaker volume
 #define reqDelay        0x38    // Get detection delay values
+#define reqGyroAct      0x39    // Get heating angle (IMU active angle)
+#define reqGyroRel      0x40    // Get cooling angle (IMU relative angle)
+#define reqMode         0x41    // Get current mode (0: AI mode, 1: IMU mode)
 
-// CONTROL Commands (0x50-0x5F) - Real-time device control
+// CONTROL Commands (0x50-0x61) - Real-time device control (Korean Protocol)
 #define ctrlReset       0x50    // Reset device
 #define ctrlMode        0x51    // Set device operating mode
 #define ctrlSpkVol      0x52    // Set speaker volume
@@ -70,7 +78,10 @@
 #define ctrlCoolFanPWM  0x56    // Set cooling fan PWM level
 #define ctrlHeatPadOn   0x57    // Turn heat pad on/off
 #define ctrlHeatPadTemp 0x58    // Set heat pad temperature
-#define ctrlPose        0x59    // Enable/disable pose detection
+#define ctrlForceUp     0x59    // Force Up mode (ON=1 only)
+#define ctrlPose        0x5A    // Enable/disable pose detection (moved from 0x59)
+#define ctrlWaiting     0x60    // Force Down mode (ON=1 only)
+#define ctrlSleeping    0x61    // Sleep mode (ON=1 only)
 
 // STATUS Commands (0x70-0x7F) - Status and sensor data
 #define statMessage     0x70    // Sensor data message from STM
@@ -462,10 +473,18 @@ void checkCommunicationRecovery();
 // -----------------------------------------------
 // Device Control API (Setters)
 // -----------------------------------------------
-bool setSleepTemperature(float targetTemp);
-bool setWaitingTemperature(float targetTemp);
-bool setOperatingTemperature(float targetTemp);
-bool setUpperTemperatureLimit(float limitTemp);
+bool setSleepTemperature(float targetTemp, float maxTemp);
+bool setWaitingTemperature(float targetTemp, float maxTemp);
+bool setOperatingTemperature(float targetTemp, float maxTemp);
+bool setUpperTemperatureLimit(float limitTemp);  // DEPRECATED - uses command 0x14
+// bool setHeatPadConfiguration(uint8_t currentLevel, uint8_t maxLevel); // NOT USED
+// bool setFanSpeedRange(uint8_t minSpeed, uint8_t maxSpeed); // NOT USED
+bool setTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);
+bool setDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
+bool setSpeakerVolumeInit(uint8_t volume_0_to_10);
+bool setGyroActiveAngle(uint8_t activeAngle);
+bool setGyroRelativeAngle(uint8_t relativeAngle);
+bool setInitialMode(uint8_t mode);
 bool setDeviceMode(DeviceMode mode);
 bool setFanState(bool enabled);
 bool setFanSpeed(uint8_t speed_0_to_3);
@@ -474,7 +493,10 @@ bool setCoolingFanLevel(uint8_t level);
 bool setHeatPadState(bool enabled);  // DEPRECATED - ctrlHeatPadOn not supported
 bool setHeatPadLevel(uint8_t level);  // DEPRECATED - ctrlHeatPadTemp not supported
 bool setSpeakerVolume(uint8_t volume_0_to_10);
-bool setPoseDetectionMode(bool enabled);
+bool setForceUpMode();
+bool setForceDownMode(); 
+bool setSleepingMode();
+bool setPoseDetectionMode(bool enabled);  // DEPRECATED - use Force mode functions
 
 // -----------------------------------------------
 // Data Retrieval API (Getters)
@@ -495,6 +517,9 @@ uint16_t getForceDownTimeout();
 uint16_t getWaitingTimeout();
 uint8_t getPoseDetectionDelay();
 uint8_t getObjectDetectionDelay();
+uint8_t getGyroActiveAngle();
+uint8_t getGyroRelativeAngle();
+uint8_t getCurrentModeValue();
 
 // -----------------------------------------------
 // Asynchronous Data Requests (Non-blocking)
@@ -506,6 +531,9 @@ bool requestUpperTemperatureLimit();
 bool requestCoolingFanLevel();
 bool requestSpeakerVolume();
 bool requestDetectionDelay();
+bool requestGyroActiveAngle();
+bool requestGyroRelativeAngle();
+bool requestCurrentMode();
 bool requestAllParameters();
 
 // -----------------------------------------------
@@ -516,9 +544,5 @@ bool isPoseDetectionMode();
 bool isObjectDetectionMode();
 const char* getCommandName(uint8_t command);
 
-// -----------------------------------------------
-// Testing and Validation
-// -----------------------------------------------
-void testESPtoSTMCommunication();
 
 #endif

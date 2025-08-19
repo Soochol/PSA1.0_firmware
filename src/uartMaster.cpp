@@ -194,8 +194,8 @@ void sendAckResponse(uint8_t receivedCommand) {
         ESP_LOGW(TAG, "[ACK-ERR] Failed to send complete ACK for 0x%02X (%zu/%zu bytes)", 
                  receivedCommand, bytesWritten, index);
     } else {
-        ESP_LOGI(TAG, "[ESP→STM] ACK 0x%02X %s (%zu bytes)", 
-                 receivedCommand, getCommandName(receivedCommand), index);
+        // ESP_LOGI(TAG, "[ESP→STM] ACK 0x%02X %s (%zu bytes)", 
+        //          receivedCommand, getCommandName(receivedCommand), index);
     }
 }
 
@@ -369,8 +369,8 @@ void resetParser() {
 // Message type specific handlers
 void handleStatusMessage() {
     if (currentMessage.command == statMessage) {
-        ESP_LOGI(TAG, "Sensor data (%d bytes)", 
-                 currentMessage.dataLength);
+        // ESP_LOGI(TAG, "Sensor data (%d bytes)", 
+        //          currentMessage.dataLength);
         parseSensorData(currentMessage.data, currentMessage.dataLength);
         sensorDataAvailable = true;
         sendResponse(currentMessage.command);
@@ -432,6 +432,7 @@ void handleModeChangeEvent() {
                     
                 case DeviceMode::WAITING:
                     // TODO: Implement WAITING mode handling
+                    
                     break;
                     
                 case DeviceMode::FORCE_UP:
@@ -982,6 +983,42 @@ void handleRequestResponse() {
                 }
                 break;
                 
+            case reqGyroAct:        // 0x39
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.gyroActiveAngle = currentMessage.data[0];
+                    ESP_LOGI(TAG, "Gyro active angle response: %d degrees", systemConfig.gyroActiveAngle);
+                } else {
+                    ESP_LOGW(TAG, "Invalid gyro active angle response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqGyroRel:        // 0x40
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.gyroRelativeAngle = currentMessage.data[0];
+                    ESP_LOGI(TAG, "Gyro relative angle response: %d degrees", systemConfig.gyroRelativeAngle);
+                    ESP_LOGI(TAG, "Actual cooling angle = %d + %d = %d degrees", 
+                             systemConfig.gyroActiveAngle, systemConfig.gyroRelativeAngle,
+                             systemConfig.gyroActiveAngle + systemConfig.gyroRelativeAngle);
+                } else {
+                    ESP_LOGW(TAG, "Invalid gyro relative angle response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
+            case reqMode:           // 0x41
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.currentModeValue = currentMessage.data[0];
+                    const char* modeNames[] = {"AI mode", "IMU mode"};
+                    if (systemConfig.currentModeValue <= 1) {
+                        ESP_LOGI(TAG, "Current mode response: %s (%d)", 
+                                 modeNames[systemConfig.currentModeValue], systemConfig.currentModeValue);
+                    } else {
+                        ESP_LOGI(TAG, "Current mode response: Unknown mode (%d)", systemConfig.currentModeValue);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Invalid current mode response length: %d", currentMessage.dataLength);
+                }
+                break;
+                
             default:
                 ESP_LOGW(TAG, "Unknown REQUEST response: 0x%02X", currentMessage.command);
                 break;
@@ -1347,10 +1384,15 @@ const char* getCommandName(uint8_t command) {
         case initTempWaiting:   return "INIT: Waiting Temperature";
         case initTempForceUp:   return "INIT: Operating Temperature";
         case initTempHeatPad:   return "INIT: Heat Pad Temperature";
+        case initPWMFan:        return "INIT: Fan Speed Range";
         case initPWMCoolFan:    return "INIT: Cooling Fan PWM";
         case initTout:          return "INIT: Timeout Settings";
+        case initTempLimit:     return "INIT: Upper Temperature Limit (DEPRECATED)";
+        case initSpk:           return "INIT: Speaker Volume";
         case initDelay:         return "INIT: Detection Delay";
-        case 0x14:              return "INIT: Upper Temperature Limit";
+        case initGyroAct:       return "INIT: Heating Angle (IMU Active)";
+        case initGyroRel:       return "INIT: Cooling Angle (IMU Relative)";
+        case initMode:          return "INIT: Mode Change";
         
         // REQUEST Commands (0x3X)
         case reqTempSleep:      return "REQUEST: Sleep Temperature";
@@ -1362,6 +1404,9 @@ const char* getCommandName(uint8_t command) {
         case reqTimeout:        return "REQUEST: Timeout Settings";
         case reqSpk:            return "REQUEST: Speaker Volume";
         case reqDelay:          return "REQUEST: Detection Delay";
+        case reqGyroAct:        return "REQUEST: Heating Angle (IMU Active)";
+        case reqGyroRel:        return "REQUEST: Cooling Angle (IMU Relative)";
+        case reqMode:           return "REQUEST: Current Mode";
         
         // CONTROL Commands (0x5X)
         case ctrlReset:         return "CONTROL: Reset Device";
@@ -1373,7 +1418,10 @@ const char* getCommandName(uint8_t command) {
         case ctrlCoolFanPWM:    return "CONTROL: Set Cooling Fan Level";
         case ctrlHeatPadOn:     return "CONTROL: Set Heat Pad State (DEPRECATED)";
         case ctrlHeatPadTemp:   return "CONTROL: Set Heat Pad Temperature (DEPRECATED)";
-        case ctrlPose:          return "CONTROL: Set Detection Mode";
+        case ctrlForceUp:       return "CONTROL: Force Up Mode";
+        case ctrlPose:          return "CONTROL: Set Detection Mode (moved to 0x5A)";
+        case ctrlWaiting:       return "CONTROL: Force Down Mode";
+        case ctrlSleeping:      return "CONTROL: Sleep Mode";
         
         // STATUS Commands (0x7X)
         case statMessage:       return "STATUS: Sensor Data";
@@ -1402,66 +1450,75 @@ const char* getCommandName(uint8_t command) {
 }
 
 // =============================================================================
-// User-friendly API functions implementation
+// INIT Command Functions (0x10-0x21) - Device Parameter Initialization
 // =============================================================================
 
-// Temperature Control Functions
-bool setSleepTemperature(float targetTemp) {
-    if (targetTemp < 0 || targetTemp > 100) {
-        ESP_LOGW(TAG, "Invalid temperature range");
+// Temperature Initialization Functions
+bool setSleepTemperature(float targetTemp, float maxTemp) {
+    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
+        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 10)         // Decimal part (x10)
+        (uint8_t)targetTemp,                                    // Target temperature integer part
+        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
+        (uint8_t)maxTemp,                                       // Max temperature integer part
+        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
     };
     
-    bool success = sendCommandAsync(initTempSleep, data, 2);
+    bool success = sendCommandAsync(initTempSleep, data, 4);
     if (success) {
-        ESP_LOGI(TAG, "Sleep temperature set to %.1f°C - Command: 0x%02X (%s)", 
-                 targetTemp, initTempSleep, getCommandName(initTempSleep));
+        ESP_LOGI(TAG, "Sleep temperature set - target: %.2f°C, max: %.2f°C - Command: 0x%02X (%s)", 
+                 targetTemp, maxTemp, initTempSleep, getCommandName(initTempSleep));
     }
     return success;
 }
 
-bool setWaitingTemperature(float targetTemp) {
-    if (targetTemp < 0 || targetTemp > 100) {
-        ESP_LOGW(TAG, "Invalid temperature range");
+bool setWaitingTemperature(float targetTemp, float maxTemp) {
+    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
+        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 10)         // Decimal part (x10)
+        (uint8_t)targetTemp,                                    // Target temperature integer part
+        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
+        (uint8_t)maxTemp,                                       // Max temperature integer part
+        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
     };
     
-    bool success = sendCommandAsync(initTempWaiting, data, 2);
+    bool success = sendCommandAsync(initTempWaiting, data, 4);
     if (success) {
-        ESP_LOGI(TAG, "Waiting temperature set to %.1f°C", targetTemp);
+        ESP_LOGI(TAG, "Waiting temperature set - target: %.2f°C, max: %.2f°C", targetTemp, maxTemp);
     }
     return success;
 }
 
-bool setOperatingTemperature(float targetTemp) {
-    if (targetTemp < 0 || targetTemp > 100) {
-        ESP_LOGW(TAG, "Invalid temperature range");
+bool setOperatingTemperature(float targetTemp, float maxTemp) {
+    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
+        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 10)         // Decimal part (x10)
+        (uint8_t)targetTemp,                                    // Target temperature integer part
+        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
+        (uint8_t)maxTemp,                                       // Max temperature integer part
+        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
     };
     
-    bool success = sendCommandAsync(initTempForceUp, data, 2);
+    bool success = sendCommandAsync(initTempForceUp, data, 4);
     if (success) {
-        ESP_LOGI(TAG, "Operating temperature set to %.1f°C", targetTemp);
+        ESP_LOGI(TAG, "Operating temperature set - target: %.2f°C, max: %.2f°C", targetTemp, maxTemp);
     }
     return success;
 }
 
 bool setUpperTemperatureLimit(float limitTemp) {
+    // DEPRECATED: This function uses deprecated command 0x14 (initTempLimit)
+    ESP_LOGW(TAG, "WARNING: setUpperTemperatureLimit uses DEPRECATED command 0x14");
+    
     if (limitTemp < 0 || limitTemp > 100) {
         ESP_LOGW(TAG, "Invalid temperature limit");
         return false;
@@ -1472,14 +1529,211 @@ bool setUpperTemperatureLimit(float limitTemp) {
         (uint8_t)((limitTemp - (int)limitTemp) * 10)         // Decimal part (x10)
     };
     
-    bool success = sendCommandAsync(0x14, data, 2); // initTempLimit command
+    bool success = sendCommandAsync(initTempLimit, data, 2); // DEPRECATED initTempLimit command
     if (success) {
-        ESP_LOGI(TAG, "Upper temperature limit set to %.1f°C", limitTemp);
+        ESP_LOGI(TAG, "Upper temperature limit set to %.1f°C (DEPRECATED COMMAND)", limitTemp);
     }
     return success;
 }
 
-// Device Mode Functions
+// System Configuration Initialization Functions
+bool setTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout) {
+    if (forceUpTimeout == 0 || forceOnTimeout == 0 || forceDownTimeout == 0 || waitingTimeout == 0) {
+        ESP_LOGW(TAG, "Invalid timeout configuration - values cannot be zero");
+        return false;
+    }
+    
+    byte data[] = {
+        (uint8_t)(forceUpTimeout & 0xFF),       // ForceUp timeout low byte
+        (uint8_t)(forceUpTimeout >> 8),         // ForceUp timeout high byte
+        (uint8_t)(forceOnTimeout & 0xFF),       // ForceOn timeout low byte
+        (uint8_t)(forceOnTimeout >> 8),         // ForceOn timeout high byte
+        (uint8_t)(forceDownTimeout & 0xFF),     // ForceDown timeout low byte
+        (uint8_t)(forceDownTimeout >> 8),       // ForceDown timeout high byte
+        (uint8_t)(waitingTimeout & 0xFF),       // Waiting timeout low byte
+        (uint8_t)(waitingTimeout >> 8)          // Waiting timeout high byte
+    };
+    
+    bool success = sendCommandAsync(initTout, data, 8);
+    if (success) {
+        ESP_LOGI(TAG, "Timeout configuration set - ForceUp: %d, ForceOn: %d, ForceDown: %d, Waiting: %d", 
+                 forceUpTimeout, forceOnTimeout, forceDownTimeout, waitingTimeout);
+    }
+    return success;
+}
+
+bool setSpeakerVolumeInit(uint8_t volume_0_to_10) {
+    if (volume_0_to_10 > 10) {
+        ESP_LOGW(TAG, "Invalid speaker volume: %d (max: 10)", volume_0_to_10);
+        return false;
+    }
+    
+    byte data[] = {volume_0_to_10};
+    
+    bool success = sendCommandAsync(initSpk, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Speaker volume initialization set to %d - Command: 0x%02X (%s)", 
+                 volume_0_to_10, initSpk, getCommandName(initSpk));
+    }
+    return success;
+}
+
+bool setDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay) {
+    if (poseDetectionDelay == 0 || objectDetectionDelay == 0) {
+        ESP_LOGW(TAG, "Invalid detection delay configuration - values cannot be zero");
+        return false;
+    }
+    
+    byte data[] = {
+        poseDetectionDelay,     // Pose detection delay (100ms units)
+        objectDetectionDelay    // Object detection delay (100ms units)
+    };
+    
+    bool success = sendCommandAsync(initDelay, data, 2);
+    if (success) {
+        ESP_LOGI(TAG, "Detection delay configuration set - pose: %d×100ms, object: %d×100ms", 
+                 poseDetectionDelay, objectDetectionDelay);
+    }
+    return success;
+}
+
+bool setGyroActiveAngle(uint8_t activeAngle) {
+    if (activeAngle > 180) {
+        ESP_LOGW(TAG, "Invalid gyro active angle: %d (max: 180)", activeAngle);
+        return false;
+    }
+    
+    byte data[] = {activeAngle};
+    
+    bool success = sendCommandAsync(initGyroAct, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Gyro active angle set to %d degrees - Command: 0x%02X (%s)", 
+                 activeAngle, initGyroAct, getCommandName(initGyroAct));
+    }
+    return success;
+}
+
+bool setGyroRelativeAngle(uint8_t relativeAngle) {
+    if (relativeAngle > 180) {
+        ESP_LOGW(TAG, "Invalid gyro relative angle: %d (max: 180)", relativeAngle);
+        return false;
+    }
+    
+    byte data[] = {relativeAngle};
+    
+    bool success = sendCommandAsync(initGyroRel, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Gyro relative angle set to %d degrees - Command: 0x%02X (%s)", 
+                 relativeAngle, initGyroRel, getCommandName(initGyroRel));
+        ESP_LOGI(TAG, "Actual cooling angle = active_angle + relative_angle");
+    }
+    return success;
+}
+
+bool setInitialMode(uint8_t mode) {
+    if (mode > 1) {
+        ESP_LOGW(TAG, "Invalid initial mode: %d (0: AI mode, 1: IMU mode)", mode);
+        return false;
+    }
+    
+    byte data[] = {mode};
+    
+    bool success = sendCommandAsync(initMode, data, 1);
+    if (success) {
+        const char* modeNames[] = {"AI mode", "IMU mode"};
+        ESP_LOGI(TAG, "Initial mode set to %s (%d) - Command: 0x%02X (%s)", 
+                 modeNames[mode], mode, initMode, getCommandName(initMode));
+    }
+    return success;
+}
+
+// =============================================================================
+// REQUEST Command Functions (0x30-0x41) - Parameter Query Functions
+// =============================================================================
+
+// Temperature Request Functions
+bool requestSleepTemperature() {
+    return sendCommandAsync(reqTempSleep);
+}
+
+bool requestWaitingTemperature() {
+    return sendCommandAsync(reqTempWaiting);
+}
+
+bool requestOperatingTemperature() {
+    return sendCommandAsync(reqTempForceUp);
+}
+
+bool requestUpperTemperatureLimit() {
+    return sendCommandAsync(reqUpperTemp);
+}
+
+// System Configuration Request Functions
+bool requestCoolingFanLevel() {
+    return sendCommandAsync(reqPWMCoolFan);
+}
+
+bool requestSpeakerVolume() {
+    return sendCommandAsync(reqSpk);
+}
+
+bool requestDetectionDelay() {
+    return sendCommandAsync(reqDelay);
+}
+
+bool requestGyroActiveAngle() {
+    return sendCommandAsync(reqGyroAct);
+}
+
+bool requestGyroRelativeAngle() {
+    return sendCommandAsync(reqGyroRel);
+}
+
+bool requestCurrentMode() {
+    return sendCommandAsync(reqMode);
+}
+
+bool requestAllParameters() {
+    bool success = true;
+    success &= requestSleepTemperature();
+    vTaskDelay(10 / portTICK_RATE_MS);  // Small delay between commands
+    success &= requestWaitingTemperature();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestOperatingTemperature();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestUpperTemperatureLimit();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    // requestHeatPadLevel() removed - deprecated functionality
+    success &= requestCoolingFanLevel();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestSpeakerVolume();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestDetectionDelay();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestGyroActiveAngle();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestGyroRelativeAngle();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestCurrentMode();
+    
+    ESP_LOGI(TAG, "All parameter requests sent %s", success ? "successfully" : "with errors");
+    return success;
+}
+
+// =============================================================================
+// CONTROL Command Functions (0x50-0x61) - Real-time Device Control
+// =============================================================================
+
+// Utility Control Functions
+bool resetDevice() {
+    bool success = sendCommandAsync(ctrlReset);
+    if (success) {
+        ESP_LOGI(TAG, "Device reset command sent");
+    }
+    return success;
+}
+
+// Device Mode Control Functions
 bool setDeviceMode(DeviceMode mode) {
     byte data[] = {static_cast<byte>(mode)};
     
@@ -1488,6 +1742,22 @@ bool setDeviceMode(DeviceMode mode) {
         const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "ERROR"};
         ESP_LOGI(TAG, "Device mode set to %s - Command: 0x%02X (%s)", 
                  modeNames[static_cast<int>(mode)], ctrlMode, getCommandName(ctrlMode));
+    }
+    return success;
+}
+
+// Audio Control Functions
+bool setSpeakerVolume(uint8_t volume_0_to_10) {
+    if (volume_0_to_10 > 10) {
+        ESP_LOGW(TAG, "Invalid volume: %d (max: 10)", volume_0_to_10);
+        return false;
+    }
+    
+    byte data[] = {volume_0_to_10};
+    
+    bool success = sendCommandAsync(ctrlSpkVol, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Speaker volume set to %d", volume_0_to_10);
     }
     return success;
 }
@@ -1544,7 +1814,7 @@ bool setCoolingFanLevel(uint8_t level) {
     return success;
 }
 
-// Actuator Control Functions - Heat Pad
+// Actuator Control Functions - Heat Pad (DEPRECATED)
 bool setHeatPadState(bool enabled) {
     // This function is deprecated - ctrlHeatPadOn (0x57) is not supported
     ESP_LOGW(TAG, "setHeatPadState is deprecated - ctrlHeatPadOn (0x57) not supported");
@@ -1557,23 +1827,60 @@ bool setHeatPadLevel(uint8_t level) {
     return false;
 }
 
-// Audio Control Functions
-bool setSpeakerVolume(uint8_t volume_0_to_10) {
-    if (volume_0_to_10 > 10) {
-        ESP_LOGW(TAG, "Invalid volume: %d (max: 10)", volume_0_to_10);
-        return false;
-    }
+// Force Mode Control Functions (Korean Protocol)
+bool setForceUpMode() {
+    byte data[] = {1}; // Always send 1 as specified
     
-    byte data[] = {volume_0_to_10};
-    
-    bool success = sendCommandAsync(ctrlSpkVol, data, 1);
+    bool success = sendCommandAsync(ctrlForceUp, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Speaker volume set to %d", volume_0_to_10);
+        ESP_LOGI(TAG, "Force Up mode activated - Command: 0x%02X (%s)", 
+                 ctrlForceUp, getCommandName(ctrlForceUp));
     }
     return success;
 }
 
-// Sensor data access function
+bool setForceDownMode() {
+    byte data[] = {1}; // Always send 1 as specified
+    
+    bool success = sendCommandAsync(ctrlWaiting, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Force Down mode activated - Command: 0x%02X (%s)", 
+                 ctrlWaiting, getCommandName(ctrlWaiting));
+    }
+    return success;
+}
+
+bool setSleepingMode() {
+    byte data[] = {1}; // Always send 1 as specified
+    
+    bool success = sendCommandAsync(ctrlSleeping, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "Sleep mode activated - Command: 0x%02X (%s)", 
+                 ctrlSleeping, getCommandName(ctrlSleeping));
+    }
+    return success;
+}
+
+// DEPRECATED: Pose detection mode setting - use Korean protocol Force modes instead
+bool setPoseDetectionMode(bool enabled) {
+    // DEPRECATED: This function is deprecated in favor of Korean protocol Force modes
+    ESP_LOGW(TAG, "WARNING: setPoseDetectionMode is DEPRECATED - use setForceUpMode/setForceDownMode/setSleepingMode instead");
+    
+    byte data[] = {enabled ? 0 : 1}; // 0: pose detection, 1: object detection
+    
+    bool success = sendCommandAsync(ctrlPose, data, 1); // Uses 0x5A (moved from 0x59)
+    if (success) {
+        ESP_LOGI(TAG, "Detection mode set to %s - Command: 0x%02X (DEPRECATED)", 
+                 enabled ? "POSE" : "OBJECT", ctrlPose);
+    }
+    return success;
+}
+
+// =============================================================================
+// STATUS Command Functions (0x70-0x7F) - Status and Sensor Data
+// =============================================================================
+
+// Sensor Data Access Function
 SensorReading getCurrentSensorData() {
     SensorReading reading = {};
     
@@ -1604,24 +1911,13 @@ SensorReading getCurrentSensorData() {
     return reading;
 }
 
-// Pose detection mode setting
-bool setPoseDetectionMode(bool enabled) {
-    byte data[] = {enabled ? 0 : 1}; // 0: pose detection, 1: object detection
-    
-    bool success = sendCommandAsync(ctrlPose, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Detection mode set to %s", enabled ? "POSE" : "OBJECT");
-    }
-    return success;
-}
+// =============================================================================
+// EVENT Command Functions - Event Processing and Status
+// =============================================================================
 
-// Utility functions
-bool resetDevice() {
-    bool success = sendCommandAsync(ctrlReset);
-    if (success) {
-        ESP_LOGI(TAG, "Device reset command sent");
-    }
-    return success;
+DeviceMode getCurrentMode() {
+    // Return the actual tracked device mode updated by event messages
+    return currentDeviceMode;
 }
 
 bool isPoseDetectionMode() {
@@ -1636,64 +1932,8 @@ bool isObjectDetectionMode() {
 }
 
 // =============================================================================
-// Async Request Functions (Non-blocking)
+// ERROR Command Functions - Error Handling
 // =============================================================================
-
-bool requestSleepTemperature() {
-    return sendCommandAsync(reqTempSleep);
-}
-
-bool requestWaitingTemperature() {
-    return sendCommandAsync(reqTempWaiting);
-}
-
-bool requestOperatingTemperature() {
-    return sendCommandAsync(reqTempForceUp);
-}
-
-bool requestUpperTemperatureLimit() {
-    return sendCommandAsync(reqUpperTemp);
-}
-
-// requestHeatPadLevel() removed - deprecated functionality
-
-bool requestCoolingFanLevel() {
-    return sendCommandAsync(reqPWMCoolFan);
-}
-
-bool requestSpeakerVolume() {
-    return sendCommandAsync(reqSpk);
-}
-
-bool requestDetectionDelay() {
-    return sendCommandAsync(reqDelay);
-}
-
-bool requestAllParameters() {
-    bool success = true;
-    success &= requestSleepTemperature();
-    vTaskDelay(10 / portTICK_RATE_MS);  // Small delay between commands
-    success &= requestWaitingTemperature();
-    vTaskDelay(10 / portTICK_RATE_MS);
-    success &= requestOperatingTemperature();
-    vTaskDelay(10 / portTICK_RATE_MS);
-    success &= requestUpperTemperatureLimit();
-    vTaskDelay(10 / portTICK_RATE_MS);
-    // requestHeatPadLevel() removed - deprecated functionality
-    success &= requestCoolingFanLevel();
-    vTaskDelay(10 / portTICK_RATE_MS);
-    success &= requestSpeakerVolume();
-    vTaskDelay(10 / portTICK_RATE_MS);
-    success &= requestDetectionDelay();
-    
-    ESP_LOGI(TAG, "All parameter requests sent %s", success ? "successfully" : "with errors");
-    return success;
-}
-
-DeviceMode getCurrentMode() {
-    // Return the actual tracked device mode updated by event messages
-    return currentDeviceMode;
-}
 
 uint8_t getLastErrorCode() {
     // Return the last error code received (0 = no error)
@@ -1704,6 +1944,7 @@ uint8_t getLastErrorCode() {
 // System Configuration Getter Functions
 // =============================================================================
 
+// Temperature Configuration Getters
 float getSleepTemperature() {
     return systemConfig.sleepTemp;
 }
@@ -1720,6 +1961,7 @@ float getUpperTemperatureLimit() {
     return systemConfig.upperTempLimit;
 }
 
+// Fan Configuration Getters
 uint8_t getCoolingFanLevel() {
     return systemConfig.coolingFanLevel;
 }
@@ -1728,10 +1970,12 @@ uint8_t getMaxCoolingFanLevel() {
     return systemConfig.maxCoolingFanLevel;
 }
 
+// Audio Configuration Getters
 uint8_t getSpeakerVolume() {
     return systemConfig.speakerVolume;
 }
 
+// Timeout Configuration Getters
 uint16_t getForceUpTimeout() {
     return systemConfig.forceUpTimeout;
 }
@@ -1748,6 +1992,7 @@ uint16_t getWaitingTimeout() {
     return systemConfig.waitingTimeout;
 }
 
+// Detection Configuration Getters
 uint8_t getPoseDetectionDelay() {
     return systemConfig.poseDetectionDelay;
 }
@@ -1756,275 +2001,17 @@ uint8_t getObjectDetectionDelay() {
     return systemConfig.objectDetectionDelay;
 }
 
-// =============================================================================
-// ESP→STM Communication Test Functions
-// =============================================================================
-
-void testESPtoSTMCommunication() {
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "======================================================");
-    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 시작 ===");
-    ESP_LOGI(TAG, "======================================================");
-    
-    uint32_t testStartTime = millis();
-    uint8_t totalTests = 0;
-    uint8_t passedTests = 0;
-    
-    // 테스트 시작 전 대기
-    ESP_LOGI(TAG, "테스트 시작 전 2초 대기...");
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
-    
-    // =================
-    // 1. INIT 명령 테스트
-    // =================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=== INIT 명령 테스트 (0x1X) ===");
-    
-    // 1-1. Sleep Temperature
-    ESP_LOGI(TAG, "1-1. Sleep Temperature 설정 테스트");
-    totalTests++;
-    if (setSleepTemperature(25.5)) {
-        ESP_LOGI(TAG, "✓ Sleep Temperature 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Sleep Temperature 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 1-2. Waiting Temperature
-    ESP_LOGI(TAG, "1-2. Waiting Temperature 설정 테스트");
-    totalTests++;
-    if (setWaitingTemperature(30.0)) {
-        ESP_LOGI(TAG, "✓ Waiting Temperature 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Waiting Temperature 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 1-3. Operating Temperature
-    ESP_LOGI(TAG, "1-3. Operating Temperature 설정 테스트");
-    totalTests++;
-    if (setOperatingTemperature(35.0)) {
-        ESP_LOGI(TAG, "✓ Operating Temperature 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Operating Temperature 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 1-4. Upper Temperature Limit
-    ESP_LOGI(TAG, "1-4. Upper Temperature Limit 설정 테스트");
-    totalTests++;
-    if (setUpperTemperatureLimit(40.0)) {
-        ESP_LOGI(TAG, "✓ Upper Temperature Limit 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Upper Temperature Limit 명령 전송 실패");
-    }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    // ===================
-    // 2. REQUEST 명령 테스트
-    // ===================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=== REQUEST 명령 테스트 (0x3X) ===");
-    
-    // 2-1. Sleep Temperature Request
-    ESP_LOGI(TAG, "2-1. Sleep Temperature 요청 테스트");
-    totalTests++;
-    if (requestSleepTemperature()) {
-        ESP_LOGI(TAG, "✓ Sleep Temperature 요청 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Sleep Temperature 요청 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 2-2. Speaker Volume Request
-    ESP_LOGI(TAG, "2-2. Speaker Volume 요청 테스트");
-    totalTests++;
-    if (requestSpeakerVolume()) {
-        ESP_LOGI(TAG, "✓ Speaker Volume 요청 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Speaker Volume 요청 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 2-3. Cooling Fan Level Request
-    ESP_LOGI(TAG, "2-3. Cooling Fan Level 요청 테스트");
-    totalTests++;
-    if (requestCoolingFanLevel()) {
-        ESP_LOGI(TAG, "✓ Cooling Fan Level 요청 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Cooling Fan Level 요청 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 2-4. Detection Delay Request
-    ESP_LOGI(TAG, "2-4. Detection Delay 요청 테스트");
-    totalTests++;
-    if (requestDetectionDelay()) {
-        ESP_LOGI(TAG, "✓ Detection Delay 요청 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Detection Delay 요청 명령 전송 실패");
-    }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    // ====================
-    // 3. CONTROL 명령 테스트
-    // ====================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=== CONTROL 명령 테스트 (0x5X) ===");
-    
-    // 3-1. Device Mode - WAITING
-    ESP_LOGI(TAG, "3-1. Device Mode → WAITING 테스트");
-    totalTests++;
-    if (setDeviceMode(DeviceMode::WAITING)) {
-        ESP_LOGI(TAG, "✓ Device Mode WAITING 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Device Mode WAITING 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-2. Device Mode - FORCE_UP
-    ESP_LOGI(TAG, "3-2. Device Mode → FORCE_UP 테스트");
-    totalTests++;
-    if (setDeviceMode(DeviceMode::FORCE_UP)) {
-        ESP_LOGI(TAG, "✓ Device Mode FORCE_UP 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Device Mode FORCE_UP 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-3. Device Mode - IMU
-    ESP_LOGI(TAG, "3-3. Device Mode → IMU 테스트");
-    totalTests++;
-    if (setDeviceMode(DeviceMode::IMU)) {
-        ESP_LOGI(TAG, "✓ Device Mode IMU 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Device Mode IMU 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-4. Fan State Control
-    ESP_LOGI(TAG, "3-4. Fan State ON 테스트");
-    totalTests++;
-    if (setFanState(true)) {
-        ESP_LOGI(TAG, "✓ Fan State ON 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Fan State ON 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-5. Fan Speed Control
-    ESP_LOGI(TAG, "3-5. Fan Speed 설정 테스트");
-    totalTests++;
-    if (setFanSpeed(3)) {
-        ESP_LOGI(TAG, "✓ Fan Speed 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Fan Speed 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-6. Speaker Volume Control
-    ESP_LOGI(TAG, "3-6. Speaker Volume 설정 테스트");
-    totalTests++;
-    if (setSpeakerVolume(5)) {
-        ESP_LOGI(TAG, "✓ Speaker Volume 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Speaker Volume 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-7. Cooling Fan State
-    ESP_LOGI(TAG, "3-7. Cooling Fan State ON 테스트");
-    totalTests++;
-    if (setCoolingFanState(true)) {
-        ESP_LOGI(TAG, "✓ Cooling Fan State ON 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Cooling Fan State ON 명령 전송 실패");
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    
-    // 3-8. Pose Detection Mode
-    ESP_LOGI(TAG, "3-8. Pose Detection Mode 설정 테스트");
-    totalTests++;
-    if (setPoseDetectionMode(true)) {
-        ESP_LOGI(TAG, "✓ Pose Detection Mode 명령 전송 성공");
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ Pose Detection Mode 명령 전송 실패");
-    }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    // ========================
-    // 4. 연속 명령 전송 테스트
-    // ========================
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=== 연속 명령 전송 테스트 ===");
-    
-    ESP_LOGI(TAG, "4-1. 연속 5개 명령 전송 테스트 시작");
-    uint32_t consecutiveStartTime = millis();
-    
-    totalTests++;
-    bool consecutiveSuccess = true;
-    consecutiveSuccess &= setDeviceMode(DeviceMode::SLEEP);
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    consecutiveSuccess &= requestSpeakerVolume();
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    consecutiveSuccess &= setFanSpeed(3);
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    consecutiveSuccess &= setCoolingFanLevel(2);
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    consecutiveSuccess &= setDeviceMode(DeviceMode::WAITING);
-    
-    uint32_t consecutiveEndTime = millis();
-    uint32_t consecutiveElapsed = consecutiveEndTime - consecutiveStartTime;
-    
-    if (consecutiveSuccess) {
-        ESP_LOGI(TAG, "✓ 연속 5개 명령 전송 성공 (소요시간: %lums)", consecutiveElapsed);
-        passedTests++;
-    } else {
-        ESP_LOGE(TAG, "✗ 연속 5개 명령 전송 실패");
-    }
-    
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
-    
-    // =================
-    // 5. 테스트 결과 요약
-    // =================
-    uint32_t testEndTime = millis();
-    uint32_t totalElapsed = testEndTime - testStartTime;
-    
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "======================================================");
-    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 결과 요약 ===");
-    ESP_LOGI(TAG, "======================================================");
-    ESP_LOGI(TAG, "총 테스트 수: %d", totalTests);
-    ESP_LOGI(TAG, "성공한 테스트: %d", passedTests);
-    ESP_LOGI(TAG, "실패한 테스트: %d", totalTests - passedTests);
-    ESP_LOGI(TAG, "성공률: %.1f%%", (float)passedTests / totalTests * 100.0);
-    ESP_LOGI(TAG, "총 소요시간: %lu초", totalElapsed / 1000);
-    ESP_LOGI(TAG, "");
-    
-    if (passedTests == totalTests) {
-        ESP_LOGI(TAG, "🎉 모든 테스트가 성공했습니다!");
-    } else {
-        ESP_LOGW(TAG, "⚠️  일부 테스트가 실패했습니다. 로그를 확인하세요.");
-    }
-    
-    ESP_LOGI(TAG, "======================================================");
-    ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 완료 ===");
-    ESP_LOGI(TAG, "======================================================");
+// Gyro Configuration Getters (Korean Protocol)
+uint8_t getGyroActiveAngle() {
+    return systemConfig.gyroActiveAngle;
 }
+
+uint8_t getGyroRelativeAngle() {
+    return systemConfig.gyroRelativeAngle;
+}
+
+// Mode Configuration Getters (Korean Protocol)
+uint8_t getCurrentModeValue() {
+    return systemConfig.currentModeValue;
+}
+
