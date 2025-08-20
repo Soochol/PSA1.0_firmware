@@ -76,6 +76,9 @@ static uint8_t nextCommandId = 1;                                 // Next comman
 static SystemState currentSystemState = SystemState::NORMAL;      // Overall system health state
 static uint32_t lastCommunicationError = 0;                       // Timestamp of last communication error
 static uint8_t consecutiveTimeouts = 0;                           // Count of consecutive command timeouts
+static uint8_t consecutiveChecksumErrors = 0;                      // Count of consecutive checksum errors  
+static uint8_t consecutiveProtocolErrors = 0;                      // Count of consecutive protocol errors
+static uint32_t lastProtocolErrorTime = 0;                         // Timestamp of last protocol error
 
 // -----------------------------------------------
 // Message Construction Working Variables
@@ -292,6 +295,9 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
  * @return true if complete message parsed, false if still parsing
  */
 bool parseIncomingByte(uint8_t byte) {
+    ESP_LOGD(TAG, "[PARSER] State: %d, Byte: 0x%02X, bufIdx: %d, expLen: %d", 
+             (int)currentState, byte, bufferIndex, expectedDataLength);
+    
     switch (currentState) {
         case MessageState::WAITING_START:
             if (byte == STM) {
@@ -299,19 +305,38 @@ bool parseIncomingByte(uint8_t byte) {
                 currentState = MessageState::READING_LENGTH;
                 bufferIndex = 0;
                 messageBuffer[bufferIndex++] = byte;
+                ESP_LOGD(TAG, "[PARSER] STM found, switching to READING_LENGTH");
             }
             break;
             
         case MessageState::READING_LENGTH:
             currentMessage.length = byte;
             messageBuffer[bufferIndex++] = byte;
+            
+            // Validate length field - reject obviously invalid lengths
+            if (byte < 4 || byte > 100) {  // Message must have at least DIR+CMD+CHKSUM+ETX (4 bytes)
+                ESP_LOGD(TAG, "[PARSER] Invalid length %d, likely false STM start - resetting", byte);
+                resetParser();
+                return false;
+            }
+            
             currentState = MessageState::READING_DIRECTION;
+            ESP_LOGD(TAG, "[PARSER] Length: %d, switching to READING_DIRECTION", byte);
             break;
             
         case MessageState::READING_DIRECTION:
             currentMessage.direction = byte;
             messageBuffer[bufferIndex++] = byte;
+            
+            // Validate direction field - must be MSG_REQUEST (0x20) or MSG_RESPONSE (0x02)
+            if (byte != MSG_REQUEST && byte != MSG_RESPONSE) {
+                ESP_LOGD(TAG, "[PARSER] Invalid direction 0x%02X, likely false STM start - resetting", byte);
+                resetParser();
+                return false;
+            }
+            
             currentState = MessageState::READING_COMMAND;
+            ESP_LOGD(TAG, "[PARSER] Direction: 0x%02X, switching to READING_COMMAND", byte);
             break;
             
         case MessageState::READING_COMMAND:
@@ -322,10 +347,27 @@ bool parseIncomingByte(uint8_t byte) {
             expectedDataLength = currentMessage.length - 4;
             currentMessage.dataLength = expectedDataLength;
             
+            // CRITICAL BUG FIX: Validate expectedDataLength to prevent infinite loops
+            if (expectedDataLength < 0) {
+                ESP_LOGW(TAG, "[PARSER] Invalid message: negative dataLength %d (len=%d), resetting parser", 
+                         expectedDataLength, currentMessage.length);
+                resetParser();
+                return false;
+            }
+            
+            if (expectedDataLength > 64) {  // Max 64 bytes of data (conservative limit)
+                ESP_LOGW(TAG, "[PARSER] Invalid message: dataLength %d exceeds maximum 64, resetting parser", 
+                         expectedDataLength);
+                resetParser();
+                return false;
+            }
+            
             if (expectedDataLength > 0) {
                 currentState = MessageState::READING_DATA;
+                ESP_LOGD(TAG, "[PARSER] Command: 0x%02X, dataLen: %d, switching to READING_DATA", byte, expectedDataLength);
             } else {
                 currentState = MessageState::READING_CHECKSUM;
+                ESP_LOGD(TAG, "[PARSER] Command: 0x%02X, no data, switching to READING_CHECKSUM", byte);
             }
             break;
             
@@ -364,6 +406,125 @@ void resetParser() {
     bufferIndex = 0;
     expectedDataLength = 0;
     memset(&currentMessage, 0, sizeof(currentMessage));
+}
+
+/**
+ * @brief Enhanced parser reset with hardware buffer flush and resynchronization
+ * @param forceResync If true, performs aggressive resynchronization  
+ */
+void resetParserWithFlush(bool forceResync = false) {
+    // Reset software parser state
+    resetParser();
+    
+    // Flush hardware UART buffers to clear any remaining data
+    STMSerial.flush();
+    
+    // Clear receive buffer with STM start byte protection
+    int bytesCleared = 0;
+    const int maxBytesToClear = forceResync ? 100 : 20;  // Limit clearing to prevent over-flushing
+    
+    while (STMSerial.available() && bytesCleared < maxBytesToClear) {
+        uint8_t nextByte = STMSerial.read();
+        bytesCleared++;
+        
+        // Check if we found STM start byte - preserve it and stop flushing
+        if (nextByte == STM && STMSerial.available() >= 2) {
+            // Peek at next bytes to confirm this looks like a valid message start
+            uint8_t lengthByte = STMSerial.read();
+            uint8_t directionByte = STMSerial.read();
+            
+            // If this looks like a valid message start, put bytes back and stop
+            if (lengthByte > 0 && lengthByte <= 0x50 && 
+                (directionByte == MSG_REQUEST || directionByte == MSG_RESPONSE)) {
+                ESP_LOGD(TAG, "[PARSER] Found valid STM message start (0x%02X 0x%02X 0x%02X) - preserving", 
+                         nextByte, lengthByte, directionByte);
+                
+                // We can't put bytes back in Arduino Serial, so mark parser to expect these
+                messageBuffer[0] = nextByte;
+                messageBuffer[1] = lengthByte; 
+                messageBuffer[2] = directionByte;
+                bufferIndex = 3;
+                currentState = MessageState::READING_COMMAND;  // Read CMD byte next
+                expectedDataLength = lengthByte - 4;  // Total length - (DIR + CMD + CHKSUM + ETX)
+                
+                ESP_LOGD(TAG, "[PARSER] Preserved STM message start, continuing from command phase");
+                break;
+            } else {
+                ESP_LOGD(TAG, "[PARSER] False STM start, continuing flush");
+                bytesCleared += 2;  // Count the peeked bytes
+            }
+        }
+        
+        if (forceResync && bytesCleared <= 50) {  // Only log first 50 in force mode
+            ESP_LOGD(TAG, "[PARSER] Discarding byte: 0x%02X", nextByte);
+        }
+        
+        vTaskDelay(1 / portTICK_RATE_MS);
+    }
+    
+    if (forceResync) {
+        ESP_LOGW(TAG, "[PARSER] Force resync completed - cleared %d bytes", bytesCleared);
+        // Additional wait for force resync
+        vTaskDelay(10 / portTICK_RATE_MS);
+    } else {
+        ESP_LOGD(TAG, "[PARSER] Basic flush completed - cleared %d bytes", bytesCleared);
+    }
+    
+    ESP_LOGD(TAG, "[PARSER] Parser reset with hardware buffer flush completed");
+}
+
+/**
+ * @brief Handle protocol errors with immediate recovery and escalating measures
+ * @param errorType Type of error that occurred
+ */
+void handleConsecutiveErrors(const char* errorType) {
+    uint32_t currentTime = xTaskGetTickCount();
+    
+    // Update error counters first
+    if (currentTime - lastProtocolErrorTime < pdMS_TO_TICKS(1000)) {
+        // Consecutive error within 1 second
+        if (strcmp(errorType, "CHECKSUM") == 0) {
+            consecutiveChecksumErrors++;
+        } else {
+            consecutiveProtocolErrors++;
+        }
+    } else {
+        // Reset counters for non-consecutive errors  
+        consecutiveChecksumErrors = 0;
+        consecutiveProtocolErrors = 0;
+        
+        // Start new error sequence
+        if (strcmp(errorType, "CHECKSUM") == 0) {
+            consecutiveChecksumErrors = 1;
+        } else {
+            consecutiveProtocolErrors = 1;
+        }
+    }
+    
+    lastProtocolErrorTime = currentTime;
+    
+    // Apply single recovery level based on error count (no duplicate execution)
+    if (consecutiveChecksumErrors >= 3) {
+        ESP_LOGW(TAG, "[RECOVERY-L3] %d consecutive %s errors - FORCE RESYNC with delay", 
+                 consecutiveChecksumErrors, errorType);
+        resetParserWithFlush(true);  // Force aggressive resync
+        vTaskDelay(pdMS_TO_TICKS(50));  // Longer recovery delay
+        consecutiveChecksumErrors = 0;  // Reset after Level 3 recovery
+        
+    } else if (consecutiveProtocolErrors >= 2 || consecutiveChecksumErrors >= 2) {
+        ESP_LOGW(TAG, "[RECOVERY-L2] %d %s errors - enhanced recovery with short delay", 
+                 (strcmp(errorType, "CHECKSUM") == 0) ? consecutiveChecksumErrors : consecutiveProtocolErrors, 
+                 errorType);
+        resetParserWithFlush(false);  // Basic flush only (reduced intensity)  
+        vTaskDelay(pdMS_TO_TICKS(10));  // Reduced delay (20ms → 10ms)
+        
+    } else {
+        ESP_LOGD(TAG, "[RECOVERY-L1] First %s error - basic recovery", errorType);
+        resetParserWithFlush(false);  // Basic recovery only
+    }
+    
+    ESP_LOGD(TAG, "[ERROR-STATS] Checksum: %d, Protocol: %d", 
+             consecutiveChecksumErrors, consecutiveProtocolErrors);
 }
 
 // Message type specific handlers
@@ -508,8 +669,8 @@ void handleEventMessage() {
         case evtInitResult:  // 0x81
             ESP_LOGI(TAG, "STM init complete");
             initSleepTemperature(30, 0);
-            initWaitingTemperature(50, 0);
-            initOperatingTemperature(60, 0);
+            initWaitingTemperature(38, 0);
+            initOperatingTemperature(66, 0);
             initUpperTemperatureLimit(80, 0);
             initTimeoutConfiguration(10, 60, 60, 250);
             break;
@@ -760,6 +921,8 @@ void logSensorDataFormatted(const SensorReading& reading) {
 void usartMasterHandler(void *pvParameters) {
     static bool testExecuted = false;
     static uint32_t startTime = xTaskGetTickCount();
+    static uint32_t lastParserStateTime = xTaskGetTickCount();
+    static MessageState lastParserState = MessageState::WAITING_START;
 
     while (1) {
         // // Check if 5 seconds have passed and test hasn't been executed yet
@@ -769,6 +932,11 @@ void usartMasterHandler(void *pvParameters) {
         //     ESP_LOGI(TAG, "=== ESP→STM 통신 테스트 완료 ===");
         //     testExecuted = true;
         // }
+        
+        int bytesAvailable = STMSerial.available();
+        if (bytesAvailable > 0) {
+            ESP_LOGD(TAG, "[UART] %d bytes available, parser state: %d", bytesAvailable, (int)currentState);
+        }
         
         while (STMSerial.available()) {
             uint8_t incomingByte = STMSerial.read();
@@ -831,7 +999,8 @@ void usartMasterHandler(void *pvParameters) {
                                  ETX, currentMessage.etx);
                     }
                     
-                    resetParser();
+                    // Apply consecutive error recovery mechanism
+                    handleConsecutiveErrors("PROTOCOL");
                     continue;
                 }
                 
@@ -860,7 +1029,9 @@ void usartMasterHandler(void *pvParameters) {
                     uint8_t calculatedChecksum = calculateChecksum(messageBuffer, bufferIndex);
                     ESP_LOGW(TAG, "[STM-ERR] Checksum FAIL: received=0x%02X, calculated=0x%02X", 
                              currentMessage.checksum, calculatedChecksum);
-                    resetParser();
+                    
+                    // Apply consecutive error recovery mechanism
+                    handleConsecutiveErrors("CHECKSUM");
                     continue;
                 }
                 
@@ -915,8 +1086,25 @@ void usartMasterHandler(void *pvParameters) {
                              currentMessage.direction, MSG_REQUEST, MSG_RESPONSE);
                 }
                 
+                // Reset error counters on successful message processing
+                consecutiveChecksumErrors = 0;
+                consecutiveProtocolErrors = 0;
+                
                 resetParser();
             }
+        }
+        
+        // Parser state timeout detection and forced reset
+        uint32_t currentTime = xTaskGetTickCount();
+        if (lastParserState != currentState) {
+            lastParserState = currentState;
+            lastParserStateTime = currentTime;
+        } else if (currentState != MessageState::WAITING_START && 
+                   (currentTime - lastParserStateTime) > (5000 / portTICK_RATE_MS)) {
+            ESP_LOGW(TAG, "[PARSER] State %d stuck for 5 seconds, forcing reset", (int)currentState);
+            ESP_LOGW(TAG, "[PARSER] bufferIndex: %d, expectedDataLength: %d", bufferIndex, expectedDataLength);
+            resetParser();
+            lastParserStateTime = currentTime;
         }
         
         // Check for command timeouts and handle critical errors
@@ -1221,6 +1409,18 @@ bool sendCommandAsync(uint8_t command, const byte* data, size_t dataLen) {
     return true;
 }
 
+// Fire-and-forget command sender - no ACK waiting, no slot management
+bool sendCommandFireAndForget(uint8_t command, const byte* data, size_t dataLen) {
+    // Send command directly without slot management
+    if (!sendCommandSafe(command, data, dataLen)) {
+        ESP_LOGE(TAG, "Failed to send fire-and-forget command 0x%02X (%s)", command, getCommandName(command));
+        return false;
+    }
+    
+    ESP_LOGD(TAG, "Fire-and-forget command 0x%02X (%s) sent successfully", 
+             command, getCommandName(command));
+    return true;
+}
 
 bool isResponseExpected() {
     for (int i = 0; i < MAX_PENDING_COMMANDS; i++) {
@@ -1607,7 +1807,7 @@ bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandAsync(initTempSleep, data, 2);
+    bool success = sendCommandFireAndForget(initTempSleep, data, 2);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Sleep Temp: %d.%02d°C [%s]", 
                  initTempSleep, tempInt, tempDec, hexDump);
@@ -1665,7 +1865,7 @@ bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandAsync(initTempForceUp, data, 2);
+    bool success = sendCommandFireAndForget(initTempForceUp, data, 2);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Operating Temp: %d.%02d°C [%s]", 
                  initTempForceUp, tempInt, tempDec, hexDump);
@@ -1697,7 +1897,7 @@ bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandAsync(initTempLimit, data, 2); // DEPRECATED initTempLimit command
+    bool success = sendCommandFireAndForget(initTempLimit, data, 2); // DEPRECATED initTempLimit command
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Upper Temp Limit: %d.%02d°C [%s] (DEPRECATED)", 
                  initTempLimit, tempInt, tempDec, hexDump);
@@ -1733,7 +1933,7 @@ bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, 
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandAsync(initTout, data, 8);
+    bool success = sendCommandFireAndForget(initTout, data, 8);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Timeout Config: Up=%d, On=%d, Down=%d, Wait=%d [%s]", 
                  initTout, forceUpTimeout, forceOnTimeout, forceDownTimeout, waitingTimeout, hexDump);
