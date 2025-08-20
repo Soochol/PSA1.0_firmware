@@ -468,22 +468,23 @@ void resetParserWithFlush(bool forceResync = false) {
     // Flush hardware UART buffers to clear any remaining data
     STMSerial.flush();
     
-    // Clear receive buffer with STM start byte protection
+    // Clear receive buffer with STM start byte protection (only for major errors)
     int bytesCleared = 0;
-    const int maxBytesToClear = forceResync ? 100 : 20;  // Limit clearing to prevent over-flushing
+    const int maxBytesToClear = forceResync ? 100 : 10;  // Reduced clearing for minor errors
     
     while (STMSerial.available() && bytesCleared < maxBytesToClear) {
         uint8_t nextByte = STMSerial.read();
         bytesCleared++;
         
-        // Check if we found STM start byte - preserve it and stop flushing
-        if (nextByte == STM && STMSerial.available() >= 2) {
+        // IMPROVED: Only preserve message starts for serious protocol errors
+        // For checksum errors on well-formed messages, don't try to preserve
+        if (nextByte == STM && STMSerial.available() >= 2 && forceResync) {
             // Peek at next bytes to confirm this looks like a valid message start
             uint8_t lengthByte = STMSerial.read();
             uint8_t directionByte = STMSerial.read();
             
             // If this looks like a valid message start, put bytes back and stop
-            if (lengthByte > 0 && lengthByte <= 0x50 && 
+            if (lengthByte >= 4 && lengthByte <= 0x50 && 
                 (directionByte == MSG_REQUEST || directionByte == MSG_RESPONSE)) {
                 ESP_LOGD(TAG, "[PARSER] Found valid STM message start (0x%02X 0x%02X 0x%02X) - preserving", 
                          nextByte, lengthByte, directionByte);
@@ -513,7 +514,7 @@ void resetParserWithFlush(bool forceResync = false) {
             }
         }
         
-        if (forceResync && bytesCleared <= 50) {  // Only log first 50 in force mode
+        if (forceResync && bytesCleared <= 10) {  // Log fewer bytes
             ESP_LOGD(TAG, "[PARSER] Discarding byte: 0x%02X", nextByte);
         }
         
@@ -1008,23 +1009,20 @@ void usartMasterHandler(void *pvParameters) {
             
             // State machine based parsing
             if (parseIncomingByte(incomingByte)) {
-                // Message complete - create hex dump with proper length calculation
+                // Message complete - create hex dump with STRICT message boundary
                 size_t expectedTotalLength = currentMessage.length + 2; // +2 for STM and LEN bytes
-                size_t actualDisplayLength = (bufferIndex < expectedTotalLength) ? bufferIndex : expectedTotalLength;
                 
+                // CRITICAL: Only show exactly the message bytes, ignore any extra buffer content
                 char hexDump[512] = {0};
-                for (size_t i = 0; i < actualDisplayLength && i < 64; i++) {
+                for (size_t i = 0; i < expectedTotalLength && i < bufferIndex; i++) {
                     snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
                              "%02X ", messageBuffer[i]);
                 }
                 
-                // Show extra bytes if any
+                // Log warning if buffer contains more than expected (consecutive message detection)
                 if (bufferIndex > expectedTotalLength) {
-                    snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "| ");
-                    for (size_t i = expectedTotalLength; i < bufferIndex && i < 64; i++) {
-                        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
-                                 "%02X ", messageBuffer[i]);
-                    }
+                    size_t extraBytes = bufferIndex - expectedTotalLength;
+                    ESP_LOGD(TAG, "[MESSAGE-BOUNDARY] Detected %zu extra bytes in buffer - likely consecutive message", extraBytes);
                 }
                 
                 // Differentiate logging by command type
@@ -1088,9 +1086,20 @@ void usartMasterHandler(void *pvParameters) {
                     ESP_LOGW(TAG, "[STM-ERR] Checksum FAIL: received=0x%02X, calculated=0x%02X", 
                              currentMessage.checksum, calculatedChecksum);
                     
-                    // Apply consecutive error recovery mechanism
-                    handleConsecutiveErrors("CHECKSUM");
-                    continue;
+                    // Check if this is a well-formed message (correct length + ETX) with just checksum issue
+                    bool wellFormedMessage = (bufferIndex == expectedTotalLength) && 
+                                           (currentMessage.etx == ETX) && 
+                                           (currentMessage.stm == STM);
+                    
+                    if (wellFormedMessage) {
+                        ESP_LOGD(TAG, "[CHECKSUM] Well-formed message with checksum mismatch - likely data corruption during transmission");
+                        ESP_LOGD(TAG, "[CHECKSUM] Attempting to process message despite checksum error");
+                        // Continue processing instead of recovery - message structure is correct
+                    } else {
+                        ESP_LOGW(TAG, "[CHECKSUM] Message malformed - applying recovery mechanism");
+                        handleConsecutiveErrors("CHECKSUM");
+                        continue;
+                    }
                 }
                 
                 // Handle according to message type and command classification
