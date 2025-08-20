@@ -133,23 +133,38 @@ uint8_t calculateChecksum(const byte* data, size_t length) {
     // XOR of STM + LEN + DIR + CMD + DATA, initial value: A5h
     uint8_t checksum = 0xA5;  // Initial value A5h
     
+    ESP_LOGD(TAG, "[CHECKSUM] Init: 0xA5, length: %zu", length);
+    
     // STM (data[0])
     checksum ^= data[0];
+    ESP_LOGD(TAG, "[CHECKSUM] After STM(0x%02X): 0x%02X", data[0], checksum);
     
     // LEN (data[1]) 
     checksum ^= data[1];
+    ESP_LOGD(TAG, "[CHECKSUM] After LEN(%d): 0x%02X", data[1], checksum);
     
     // DIR (data[2])
     checksum ^= data[2];
+    ESP_LOGD(TAG, "[CHECKSUM] After DIR(0x%02X): 0x%02X", data[2], checksum);
     
     // CMD (data[3])
     checksum ^= data[3];
+    ESP_LOGD(TAG, "[CHECKSUM] After CMD(0x%02X): 0x%02X", data[3], checksum);
     
     // DATA (data[4] ~ data[length-3])
-    for (size_t i = 4; i < length - 2; i++) {
+    size_t dataStart = 4;
+    size_t dataEnd = length - 2;  // Exclude CHKSUM and ETX
+    ESP_LOGD(TAG, "[CHECKSUM] Processing DATA bytes %zu to %zu", dataStart, dataEnd - 1);
+    
+    for (size_t i = dataStart; i < dataEnd; i++) {
+        uint8_t oldChecksum = checksum;
         checksum ^= data[i];
+        if (i < dataStart + 5 || i >= dataEnd - 5) {  // Log first and last 5 bytes only
+            ESP_LOGD(TAG, "[CHECKSUM] DATA[%zu]=0x%02X: 0x%02X -> 0x%02X", i, data[i], oldChecksum, checksum);
+        }
     }
     
+    ESP_LOGD(TAG, "[CHECKSUM] Final calculated checksum: 0x%02X", checksum);
     return checksum;
 }
 
@@ -343,9 +358,16 @@ bool parseIncomingByte(uint8_t byte) {
             currentMessage.command = byte;
             messageBuffer[bufferIndex++] = byte;
             
-            // Calculate data length: LEN - DIR(1) - CMD(1) - CHKSUM(1) - ETX(1)
-            expectedDataLength = currentMessage.length - 4;
-            currentMessage.dataLength = expectedDataLength;
+            // Only calculate data length if not already set (e.g., by resetParserWithFlush)
+            if (expectedDataLength == 0 && currentMessage.dataLength == 0) {
+                // Calculate data length: LEN - DIR(1) - CMD(1) - CHKSUM(1) - ETX(1)
+                expectedDataLength = currentMessage.length - 4;
+                currentMessage.dataLength = expectedDataLength;
+                
+                ESP_LOGD(TAG, "[PARSER] Calculating dataLength: %d - 4 = %d", currentMessage.length, expectedDataLength);
+            } else {
+                ESP_LOGD(TAG, "[PARSER] Using pre-calculated dataLength: %d", expectedDataLength);
+            }
             
             // CRITICAL BUG FIX: Validate expectedDataLength to prevent infinite loops
             if (expectedDataLength < 0) {
@@ -373,25 +395,52 @@ bool parseIncomingByte(uint8_t byte) {
             
         case MessageState::READING_DATA:
             if (currentMessage.dataLength > 0 && bufferIndex - 4 < expectedDataLength) {
+                // Check for embedded STM start byte (0x02) which could indicate corrupted stream
+                if (byte == STM && bufferIndex > 4) {
+                    ESP_LOGW(TAG, "[PARSER] Found embedded STM byte (0x02) at data position %d/%d - possible stream corruption", 
+                             bufferIndex - 4, expectedDataLength);
+                    ESP_LOGW(TAG, "[PARSER] Resetting parser to resynchronize with new message");
+                    resetParser();
+                    // Process this STM byte as potential new message start
+                    return parseIncomingByte(byte);
+                }
+                
                 currentMessage.data[bufferIndex - 4] = byte;
                 messageBuffer[bufferIndex++] = byte;
                 
                 if (bufferIndex - 4 >= expectedDataLength) {
                     currentState = MessageState::READING_CHECKSUM;
+                    ESP_LOGD(TAG, "[PARSER] Data complete, switching to READING_CHECKSUM");
                 }
             }
             break;
             
         case MessageState::READING_CHECKSUM:
+            // Check for unexpected STM byte instead of checksum
+            if (byte == STM) {
+                ESP_LOGW(TAG, "[PARSER] Found STM byte (0x02) instead of checksum - message corruption detected");
+                resetParser();
+                return parseIncomingByte(byte);
+            }
+            
             currentMessage.checksum = byte;
             messageBuffer[bufferIndex++] = byte;
             currentState = MessageState::READING_END;
+            ESP_LOGD(TAG, "[PARSER] Checksum: 0x%02X, switching to READING_END", byte);
             break;
             
         case MessageState::READING_END:
+            // Check for unexpected STM byte instead of ETX
+            if (byte == STM) {
+                ESP_LOGW(TAG, "[PARSER] Found STM byte (0x02) instead of ETX (0x03) - message corruption detected");
+                resetParser();
+                return parseIncomingByte(byte);
+            }
+            
             currentMessage.etx = byte;
             messageBuffer[bufferIndex++] = byte;
             currentState = MessageState::MESSAGE_COMPLETE;
+            ESP_LOGD(TAG, "[PARSER] ETX: 0x%02X, message complete", byte);
             return true; // Message complete
             
         default:
@@ -444,10 +493,19 @@ void resetParserWithFlush(bool forceResync = false) {
                 messageBuffer[1] = lengthByte; 
                 messageBuffer[2] = directionByte;
                 bufferIndex = 3;
-                currentState = MessageState::READING_COMMAND;  // Read CMD byte next
-                expectedDataLength = lengthByte - 4;  // Total length - (DIR + CMD + CHKSUM + ETX)
                 
-                ESP_LOGD(TAG, "[PARSER] Preserved STM message start, continuing from command phase");
+                // Set message fields for preserved bytes
+                currentMessage.stm = nextByte;
+                currentMessage.length = lengthByte;
+                currentMessage.direction = directionByte;
+                
+                // Calculate expectedDataLength ONCE and set state
+                expectedDataLength = lengthByte - 4;  // Total length - (DIR + CMD + CHKSUM + ETX)
+                currentMessage.dataLength = expectedDataLength;
+                currentState = MessageState::READING_COMMAND;  // Read CMD byte next
+                
+                ESP_LOGD(TAG, "[PARSER] Preserved STM message start, continuing from command phase (expLen=%d)", 
+                         expectedDataLength);
                 break;
             } else {
                 ESP_LOGD(TAG, "[PARSER] False STM start, continuing flush");
