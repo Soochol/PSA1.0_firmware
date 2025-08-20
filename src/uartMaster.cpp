@@ -259,8 +259,8 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
         return false;
     }
     
-    // Log outgoing message
-    ESP_LOGI(TAG, "[ESP→STM] 0x%02X %s (%d bytes)", command, getCommandName(command), messageSize);
+    // Log outgoing message (DEBUG level to reduce verbosity)
+    ESP_LOGD(TAG, "[ESP→STM] 0x%02X %s (%d bytes)", command, getCommandName(command), messageSize);
     
     // Hex dump of outgoing packet
     char hexDump[256] = {0};
@@ -268,7 +268,7 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
                  "%02X ", buffer[i]);
     }
-    ESP_LOGV(TAG, "[ESP→STM] Raw: %s", hexDump);
+    ESP_LOGD(TAG, "[ESP→STM] Raw: %s", hexDump);
     
     // Send message via UART
     size_t bytesWritten = STMSerial.write(buffer, messageSize);
@@ -369,10 +369,43 @@ void resetParser() {
 // Message type specific handlers
 void handleStatusMessage() {
     if (currentMessage.command == statMessage) {
-        // ESP_LOGI(TAG, "Sensor data (%d bytes)", 
-        //          currentMessage.dataLength);
         parseSensorData(currentMessage.data, currentMessage.dataLength);
         sensorDataAvailable = true;
+        
+        // Create consolidated log for STATUS message (like INIT commands)
+        SensorReading currentReading = getCurrentSensorData();
+        
+        // Convert sensor values for display
+        float leftPressure = currentReading.leftPressure / 100.0f;
+        float rightPressure = currentReading.rightPressure / 100.0f;
+        float outsideTemp = currentReading.outsideTemp / 100.0f;
+        float boardTemp = currentReading.boardTemp / 100.0f;
+        float actuatorTemp = currentReading.actuatorTemp / 100.0f;
+        float batteryVoltage = currentReading.batteryVoltage / 100.0f;
+        float objectDistance = currentReading.objectDistance / 100.0f;
+        float actuatorDisp = currentReading.actuatorDisplacement / 100.0f;
+        
+        // Check if IMU is active
+        bool imuActive = (currentReading.leftGyro[0] != 0 || currentReading.leftGyro[1] != 0 || currentReading.leftGyro[2] != 0 ||
+                         currentReading.rightGyro[0] != 0 || currentReading.rightGyro[1] != 0 || currentReading.rightGyro[2] != 0 ||
+                         currentReading.leftAccel[0] != 0 || currentReading.leftAccel[1] != 0 || currentReading.leftAccel[2] != 0 ||
+                         currentReading.rightAccel[0] != 0 || currentReading.rightAccel[1] != 0 || currentReading.rightAccel[2] != 0);
+        
+        // Build abbreviated HEX dump (core sensor data only: pressure + temp + voltage)
+        char hexDump[64] = {0};
+        size_t startIdx = 24; // Skip IMU data (24 bytes), start from pressure sensors
+        for (size_t i = startIdx; i < startIdx + 10 && i < currentMessage.dataLength; i++) {
+            snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", currentMessage.data[i]);
+        }
+        
+        // Log consolidated STATUS message
+        ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X), IMU:%s | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X [%s]",
+                 statMessage, imuActive ? "ON" : "OFF",
+                 leftPressure, rightPressure,
+                 outsideTemp, boardTemp, actuatorTemp,
+                 batteryVoltage, objectDistance, actuatorDisp,
+                 currentReading.leftIMUEvent, currentReading.rightIMUEvent, hexDump);
+        
         sendResponse(currentMessage.command);
         
         // Maintain existing TinyML logic
@@ -474,6 +507,11 @@ void handleEventMessage() {
             break;
         case evtInitResult:  // 0x81
             ESP_LOGI(TAG, "STM init complete");
+            initSleepTemperature(30, 0);
+            initWaitingTemperature(50, 0);
+            initOperatingTemperature(60, 0);
+            initUpperTemperatureLimit(80, 0);
+            initTimeoutConfiguration(10, 60, 60, 250);
             break;
         case evtMode:        // 0x82
             ESP_LOGI(TAG, "Mode change event");
@@ -583,48 +621,67 @@ void parseSensorData(const uint8_t* data, size_t length) {
     }
     
     // Pressure sensors (4 bytes total: L + R)
+    // Format: First byte = integer part, Second byte = decimal part (e.g., 0x05 0x25 = 5.25g)
     // Left pressure sensor (2 bytes)
     if (index + 1 < length) {
-        allData.L_ads = (data[index] << 8) | data[index + 1];
+        uint8_t pressureInt = data[index];      // Integer part
+        uint8_t pressureDec = data[index + 1];  // Decimal part
+        allData.L_ads = (pressureInt * 100) + pressureDec;  // Store as integer.decimal format
         index += PRESSURE_DATA_SIZE;
     }
     // Right pressure sensor (2 bytes)
     if (index + 1 < length) {
-        allData.R_ads = (data[index] << 8) | data[index + 1];
+        uint8_t pressureInt = data[index];      // Integer part
+        uint8_t pressureDec = data[index + 1];  // Decimal part
+        allData.R_ads = (pressureInt * 100) + pressureDec;  // Store as integer.decimal format
         index += PRESSURE_DATA_SIZE;
     }
     
     // Temperature sensors (6 bytes total: 3 sensors * 2 bytes each)
+    // Format: First byte = integer part, Second byte = decimal part (e.g., 0x18 0x40 = 24.64°C)
     // Outside temperature (2 bytes)
     if (index + 1 < length) {
-        allData.outTemp = (data[index] << 8) | data[index + 1];
+        uint8_t tempInt = data[index];      // Integer part
+        uint8_t tempDec = data[index + 1];  // Decimal part
+        allData.outTemp = (tempInt * 100) + tempDec;  // Store as 2464 for 24.64°C
         index += TEMPERATURE_DATA_SIZE;
     }
     // Board temperature (2 bytes)
     if (index + 1 < length) {
-        allData.boardTemp = (data[index] << 8) | data[index + 1];
+        uint8_t tempInt = data[index];      // Integer part
+        uint8_t tempDec = data[index + 1];  // Decimal part
+        allData.boardTemp = (tempInt * 100) + tempDec;  // Store as integer.decimal format
         index += TEMPERATURE_DATA_SIZE;
     }
     // Actuator temperature (2 bytes)
     if (index + 1 < length) {
-        allData.lmaTemp = (data[index] << 8) | data[index + 1];
+        uint8_t tempInt = data[index];      // Integer part
+        uint8_t tempDec = data[index + 1];  // Decimal part
+        allData.lmaTemp = (tempInt * 100) + tempDec;  // Store as integer.decimal format
         index += TEMPERATURE_DATA_SIZE;
     }
     
     // Other sensors (6 bytes total: 3 sensors * 2 bytes each)
+    // Format: First byte = integer part, Second byte = decimal part
     // Actuator displacement (2 bytes)
     if (index + 1 < length) {
-        allData.lmaLength = (data[index] << 8) | data[index + 1];
+        uint8_t dispInt = data[index];      // Integer part (mm)
+        uint8_t dispDec = data[index + 1];  // Decimal part
+        allData.lmaLength = (dispInt * 100) + dispDec;  // Store as integer.decimal format
         index += TEMPERATURE_DATA_SIZE;
     }
     // Object distance (2 bytes)
     if (index + 1 < length) {
-        allData.objDistance = (data[index] << 8) | data[index + 1];
+        uint8_t distInt = data[index];      // Integer part (mm)
+        uint8_t distDec = data[index + 1];  // Decimal part
+        allData.objDistance = (distInt * 100) + distDec;  // Store as integer.decimal format
         index += TEMPERATURE_DATA_SIZE;
     }
     // Battery voltage (2 bytes)
     if (index + 1 < length) {
-        allData.battery = (data[index] << 8) | data[index + 1];
+        uint8_t voltInt = data[index];      // Integer part (V)
+        uint8_t voltDec = data[index + 1];  // Decimal part
+        allData.battery = (voltInt * 100) + voltDec;  // Store as integer.decimal format
         index += TEMPERATURE_DATA_SIZE;
     }
     
@@ -638,6 +695,47 @@ void parseSensorData(const uint8_t* data, size_t length) {
     if (index < length) {
         allData.rightIMUEvent = data[index];
         index += IMU_EVENT_SIZE;
+    }
+}
+
+/**
+ * @brief Format and log sensor data in human-readable format
+ * @param reading SensorReading structure with parsed sensor data
+ */
+void logSensorDataFormatted(const SensorReading& reading) {
+    // Check if IMU data is active (non-zero values)
+    bool imuActive = (reading.leftGyro[0] != 0 || reading.leftGyro[1] != 0 || reading.leftGyro[2] != 0 ||
+                     reading.rightGyro[0] != 0 || reading.rightGyro[1] != 0 || reading.rightGyro[2] != 0 ||
+                     reading.leftAccel[0] != 0 || reading.leftAccel[1] != 0 || reading.leftAccel[2] != 0 ||
+                     reading.rightAccel[0] != 0 || reading.rightAccel[1] != 0 || reading.rightAccel[2] != 0);
+    
+    // Convert temperature values from integer.decimal format (e.g., 2464 = 24.64°C)
+    float outsideTemp = reading.outsideTemp / 100.0f;
+    float boardTemp = reading.boardTemp / 100.0f;
+    float actuatorTemp = reading.actuatorTemp / 100.0f;
+    
+    // Convert other sensor values from integer.decimal format
+    float leftPressure = reading.leftPressure / 100.0f;     // e.g., 525 = 5.25g
+    float rightPressure = reading.rightPressure / 100.0f;   // e.g., 325 = 3.25g
+    float batteryVoltage = reading.batteryVoltage / 100.0f;  // e.g., 1496 = 14.96V
+    float objectDistance = reading.objectDistance / 100.0f;  // e.g., 1250 = 12.50mm
+    float actuatorDisp = reading.actuatorDisplacement / 100.0f; // e.g., 825 = 8.25mm
+    
+    // Log formatted sensor data
+    ESP_LOGI(TAG, "[SENSOR] IMU:%s | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X",
+             imuActive ? "ON" : "OFF",
+             leftPressure, rightPressure,
+             outsideTemp, boardTemp, actuatorTemp,
+             batteryVoltage, objectDistance, actuatorDisp,
+             reading.leftIMUEvent, reading.rightIMUEvent);
+    
+    // Log IMU details only if active
+    if (imuActive) {
+        ESP_LOGI(TAG, "[IMU] L_Gyro:[%d,%d,%d] L_Accel:[%d,%d,%d] R_Gyro:[%d,%d,%d] R_Accel:[%d,%d,%d]",
+                 reading.leftGyro[0], reading.leftGyro[1], reading.leftGyro[2],
+                 reading.leftAccel[0], reading.leftAccel[1], reading.leftAccel[2],
+                 reading.rightGyro[0], reading.rightGyro[1], reading.rightGyro[2],
+                 reading.rightAccel[0], reading.rightAccel[1], reading.rightAccel[2]);
     }
 }
 
@@ -703,10 +801,21 @@ void usartMasterHandler(void *pvParameters) {
                     }
                 }
                 
-                // Single line log with packet and command symbol
-                ESP_LOGI(TAG, "[STM→ESP] %s→ %s", hexDump, getCommandName(currentMessage.command));
-                ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
-                         currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
+                // Differentiate logging by command type
+                if (currentMessage.command == statMessage) {
+                    // For sensor data, detailed logging is handled in handleStatusMessage()
+                    // Only log HEX dump in DEBUG level for debugging
+                    ESP_LOGD(TAG, "[HEX] %s→ %s", hexDump, getCommandName(currentMessage.command));
+                    ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
+                             currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
+                } else {
+                    // For other commands, show full HEX dump
+                    ESP_LOGI(TAG, "[STM→ESP] %s→ %s", hexDump, getCommandName(currentMessage.command));
+                    // Always log HEX dump in DEBUG level for debugging
+                    ESP_LOGD(TAG, "[HEX] %s→ %s", hexDump, getCommandName(currentMessage.command));
+                    ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
+                             currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
+                }
                 
                 // Enhanced protocol validation with command-type-specific direction checking
                 const char* validationError = nullptr;
@@ -890,53 +999,65 @@ void handleRequestResponse() {
             pendingCommands[slot].responseLength = copyLen;
         }
         
-        ESP_LOGI(TAG, "REQUEST response received for command 0x%02X (%s) (slot %d)", 
-                 currentMessage.command, getCommandName(currentMessage.command), slot);
+        // Create consolidated log for REQUEST response (like INIT/STATUS commands)
+        char hexDump[32] = {0};
+        for (size_t i = 0; i < currentMessage.dataLength && i < 10; i++) {
+            snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", currentMessage.data[i]);
+        }
         
         // Communication recovery check
         if (currentSystemState != SystemState::NORMAL) {
             checkCommunicationRecovery();
         }
         
-        // Process response data based on command type
+        // Process response data and create unified log based on command type
         switch (currentMessage.command) {
             case reqTempSleep:      // 0x30
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                    ESP_LOGI(TAG, "Sleep temp response: %.1f°C", systemConfig.sleepTemp);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Sleep Temp: %.1f°C [%s]", 
+                             currentMessage.command, systemConfig.sleepTemp, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid sleep temp response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Sleep Temp: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqTempWaiting:    // 0x31
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                    ESP_LOGI(TAG, "Waiting temp response: %.1f°C", systemConfig.waitingTemp);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Waiting Temp: %.1f°C [%s]", 
+                             currentMessage.command, systemConfig.waitingTemp, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid waiting temp response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Waiting Temp: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqTempForceUp:    // 0x32
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                    ESP_LOGI(TAG, "Operating temp response: %.1f°C", systemConfig.operatingTemp);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Operating Temp: %.1f°C [%s]", 
+                             currentMessage.command, systemConfig.operatingTemp, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid operating temp response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Operating Temp: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqTempHeatPad:    // 0x33 - DEPRECATED
-                ESP_LOGW(TAG, "reqTempHeatPad (0x33) is deprecated and ignored");
+                ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Heat Pad Temp: DEPRECATED [%s]", 
+                         currentMessage.command, hexDump);
                 break;
                 
             case reqUpperTemp:      // 0x34
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
-                    ESP_LOGI(TAG, "Upper temp limit response: %.1f°C", systemConfig.upperTempLimit);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Upper Temp Limit: %.1f°C [%s]", 
+                             currentMessage.command, systemConfig.upperTempLimit, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid upper temp limit response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Upper Temp Limit: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
@@ -944,9 +1065,11 @@ void handleRequestResponse() {
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.coolingFanLevel = currentMessage.data[0];
                     systemConfig.maxCoolingFanLevel = currentMessage.data[1];
-                    ESP_LOGI(TAG, "Cooling fan level response: %d/%d", systemConfig.coolingFanLevel, systemConfig.maxCoolingFanLevel);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Fan Speed: Level %d/%d [%s]", 
+                             currentMessage.command, systemConfig.coolingFanLevel, systemConfig.maxCoolingFanLevel, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid cooling fan level response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Fan Speed: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
@@ -956,19 +1079,23 @@ void handleRequestResponse() {
                     systemConfig.forceOnTimeout = (currentMessage.data[2] << 8) | currentMessage.data[3];
                     systemConfig.forceDownTimeout = (currentMessage.data[4] << 8) | currentMessage.data[5];
                     systemConfig.waitingTimeout = (currentMessage.data[6] << 8) | currentMessage.data[7];
-                    ESP_LOGI(TAG, "Timeout response: ForceUp=%d, ForceOn=%d, ForceDown=%d, Waiting=%d", 
-                             systemConfig.forceUpTimeout, systemConfig.forceOnTimeout, systemConfig.forceDownTimeout, systemConfig.waitingTimeout);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Timeout Config: Up=%d, On=%d, Down=%d, Wait=%d [%s]", 
+                             currentMessage.command, systemConfig.forceUpTimeout, systemConfig.forceOnTimeout, 
+                             systemConfig.forceDownTimeout, systemConfig.waitingTimeout, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid timeout response length: %d (expected 8)", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Timeout Config: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqSpk:            // 0x37
                 if (currentMessage.dataLength >= 1) {
                     systemConfig.speakerVolume = currentMessage.data[0];
-                    ESP_LOGI(TAG, "Speaker volume response: %d", systemConfig.speakerVolume);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Speaker Volume: %d [%s]", 
+                             currentMessage.command, systemConfig.speakerVolume, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid speaker volume response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Speaker Volume: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
@@ -976,31 +1103,34 @@ void handleRequestResponse() {
                 if (currentMessage.dataLength >= 2) {
                     systemConfig.poseDetectionDelay = currentMessage.data[0];    // 100ms units
                     systemConfig.objectDetectionDelay = currentMessage.data[1];  // 100ms units
-                    ESP_LOGI(TAG, "Detection delay response: Pose=%d00ms, Object=%d00ms", 
-                             systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Detection Delay: Pose=%ds, Object=%ds [%s]", 
+                             currentMessage.command, systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid detection delay response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Detection Delay: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqGyroAct:        // 0x39
                 if (currentMessage.dataLength >= 1) {
                     systemConfig.gyroActiveAngle = currentMessage.data[0];
-                    ESP_LOGI(TAG, "Gyro active angle response: %d degrees", systemConfig.gyroActiveAngle);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Gyro Active Angle: %d° [%s]", 
+                             currentMessage.command, systemConfig.gyroActiveAngle, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid gyro active angle response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Gyro Active Angle: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
             case reqGyroRel:        // 0x40
                 if (currentMessage.dataLength >= 1) {
                     systemConfig.gyroRelativeAngle = currentMessage.data[0];
-                    ESP_LOGI(TAG, "Gyro relative angle response: %d degrees", systemConfig.gyroRelativeAngle);
-                    ESP_LOGI(TAG, "Actual cooling angle = %d + %d = %d degrees", 
-                             systemConfig.gyroActiveAngle, systemConfig.gyroRelativeAngle,
-                             systemConfig.gyroActiveAngle + systemConfig.gyroRelativeAngle);
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Gyro Relative Angle: %d° (Total: %d°) [%s]", 
+                             currentMessage.command, systemConfig.gyroRelativeAngle,
+                             systemConfig.gyroActiveAngle + systemConfig.gyroRelativeAngle, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "Invalid gyro relative angle response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Gyro Relative Angle: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
@@ -1009,13 +1139,16 @@ void handleRequestResponse() {
                     systemConfig.currentModeValue = currentMessage.data[0];
                     const char* modeNames[] = {"AI mode", "IMU mode"};
                     if (systemConfig.currentModeValue <= 1) {
-                        ESP_LOGI(TAG, "Current mode response: %s (%d)", 
-                                 modeNames[systemConfig.currentModeValue], systemConfig.currentModeValue);
+                        ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Current Mode: %s (%d) [%s]", 
+                                 currentMessage.command, modeNames[systemConfig.currentModeValue], 
+                                 systemConfig.currentModeValue, hexDump);
                     } else {
-                        ESP_LOGI(TAG, "Current mode response: Unknown mode (%d)", systemConfig.currentModeValue);
+                        ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Current Mode: Unknown (%d) [%s]", 
+                                 currentMessage.command, systemConfig.currentModeValue, hexDump);
                     }
                 } else {
-                    ESP_LOGW(TAG, "Invalid current mode response length: %d", currentMessage.dataLength);
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Current Mode: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
                 
@@ -1083,7 +1216,7 @@ bool sendCommandAsync(uint8_t command, const byte* data, size_t dataLen) {
         return false;
     }
     
-    ESP_LOGI(TAG, "Command 0x%02X (%s) sent asynchronously (slot %d)", 
+    ESP_LOGD(TAG, "Command 0x%02X (%s) sent asynchronously (slot %d)", 
              command, getCommandName(command), slot);
     return true;
 }
@@ -1384,7 +1517,6 @@ const char* getCommandName(uint8_t command) {
         case initTempWaiting:   return "INIT: Waiting Temperature";
         case initTempForceUp:   return "INIT: Operating Temperature";
         case initTempHeatPad:   return "INIT: Heat Pad Temperature";
-        case initPWMFan:        return "INIT: Fan Speed Range";
         case initPWMCoolFan:    return "INIT: Cooling Fan PWM";
         case initTout:          return "INIT: Timeout Settings";
         case initTempLimit:     return "INIT: Upper Temperature Limit (DEPRECATED)";
@@ -1454,115 +1586,162 @@ const char* getCommandName(uint8_t command) {
 // =============================================================================
 
 // Temperature Initialization Functions
-bool setSleepTemperature(float targetTemp, float maxTemp) {
-    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
-        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
+bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec) {
+    if (tempInt > 100 || tempDec > 99) {
+        ESP_LOGW(TAG, "Invalid temperature - %d.%02d", tempInt, tempDec);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Target temperature integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
-        (uint8_t)maxTemp,                                       // Max temperature integer part
-        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
+        tempInt,    // Temperature integer part
+        tempDec     // Temperature decimal part
     };
     
-    bool success = sendCommandAsync(initTempSleep, data, 4);
+    // Build message to get HEX packet for logging
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t messageSize = buildMessage(buffer, initTempSleep, data, 2);
+    
+    // Create HEX dump string
+    char hexDump[64] = {0};
+    for (size_t i = 0; i < messageSize && i < 16; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
+    }
+    
+    bool success = sendCommandAsync(initTempSleep, data, 2);
     if (success) {
-        ESP_LOGI(TAG, "Sleep temperature set - target: %.2f°C, max: %.2f°C - Command: 0x%02X (%s)", 
-                 targetTemp, maxTemp, initTempSleep, getCommandName(initTempSleep));
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Sleep Temp: %d.%02d°C [%s]", 
+                 initTempSleep, tempInt, tempDec, hexDump);
     }
     return success;
 }
 
-bool setWaitingTemperature(float targetTemp, float maxTemp) {
-    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
-        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
+bool initWaitingTemperature(uint8_t tempInt, uint8_t tempDec) {
+    if (tempInt > 100 || tempDec > 99) {
+        ESP_LOGW(TAG, "Invalid temperature - %d.%02d", tempInt, tempDec);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Target temperature integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
-        (uint8_t)maxTemp,                                       // Max temperature integer part
-        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
+        tempInt,    // Temperature integer part
+        tempDec     // Temperature decimal part
     };
     
-    bool success = sendCommandAsync(initTempWaiting, data, 4);
+    // Build message to get HEX packet for logging
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t messageSize = buildMessage(buffer, initTempWaiting, data, 2);
+    
+    // Create HEX dump string
+    char hexDump[64] = {0};
+    for (size_t i = 0; i < messageSize && i < 16; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
+    }
+    
+    bool success = sendCommandAsync(initTempWaiting, data, 2);
     if (success) {
-        ESP_LOGI(TAG, "Waiting temperature set - target: %.2f°C, max: %.2f°C", targetTemp, maxTemp);
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Waiting Temp: %d.%02d°C [%s]", 
+                 initTempWaiting, tempInt, tempDec, hexDump);
     }
     return success;
 }
 
-bool setOperatingTemperature(float targetTemp, float maxTemp) {
-    if (targetTemp < 0 || targetTemp > 100 || maxTemp < 0 || maxTemp > 100 || targetTemp > maxTemp) {
-        ESP_LOGW(TAG, "Invalid temperature range - target: %.1f, max: %.1f", targetTemp, maxTemp);
+bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec) {
+    if (tempInt > 100 || tempDec > 99) {
+        ESP_LOGW(TAG, "Invalid temperature - %d.%02d", tempInt, tempDec);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)targetTemp,                                    // Target temperature integer part
-        (uint8_t)((targetTemp - (int)targetTemp) * 100),       // Target temperature decimal part (×100)
-        (uint8_t)maxTemp,                                       // Max temperature integer part
-        (uint8_t)((maxTemp - (int)maxTemp) * 100)              // Max temperature decimal part (×100)
+        tempInt,    // Temperature integer part
+        tempDec     // Temperature decimal part
     };
     
-    bool success = sendCommandAsync(initTempForceUp, data, 4);
+    // Build message to get HEX packet for logging
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t messageSize = buildMessage(buffer, initTempForceUp, data, 2);
+    
+    // Create HEX dump string
+    char hexDump[64] = {0};
+    for (size_t i = 0; i < messageSize && i < 16; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
+    }
+    
+    bool success = sendCommandAsync(initTempForceUp, data, 2);
     if (success) {
-        ESP_LOGI(TAG, "Operating temperature set - target: %.2f°C, max: %.2f°C", targetTemp, maxTemp);
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Operating Temp: %d.%02d°C [%s]", 
+                 initTempForceUp, tempInt, tempDec, hexDump);
     }
     return success;
 }
 
-bool setUpperTemperatureLimit(float limitTemp) {
+bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec) {
     // DEPRECATED: This function uses deprecated command 0x14 (initTempLimit)
-    ESP_LOGW(TAG, "WARNING: setUpperTemperatureLimit uses DEPRECATED command 0x14");
+    ESP_LOGW(TAG, "WARNING: initUpperTemperatureLimit uses DEPRECATED command 0x14");
     
-    if (limitTemp < 0 || limitTemp > 100) {
-        ESP_LOGW(TAG, "Invalid temperature limit");
+    if (tempInt > 100 || tempDec > 99) {
+        ESP_LOGW(TAG, "Invalid temperature - %d.%02d", tempInt, tempDec);
         return false;
     }
     
     byte data[] = {
-        (uint8_t)limitTemp,                                    // Integer part
-        (uint8_t)((limitTemp - (int)limitTemp) * 10)         // Decimal part (x10)
+        tempInt,    // Temperature integer part
+        tempDec     // Temperature decimal part
     };
+    
+    // Build message to get HEX packet for logging
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t messageSize = buildMessage(buffer, initTempLimit, data, 2);
+    
+    // Create HEX dump string
+    char hexDump[64] = {0};
+    for (size_t i = 0; i < messageSize && i < 16; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
+    }
     
     bool success = sendCommandAsync(initTempLimit, data, 2); // DEPRECATED initTempLimit command
     if (success) {
-        ESP_LOGI(TAG, "Upper temperature limit set to %.1f°C (DEPRECATED COMMAND)", limitTemp);
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Upper Temp Limit: %d.%02d°C [%s] (DEPRECATED)", 
+                 initTempLimit, tempInt, tempDec, hexDump);
     }
     return success;
 }
 
 // System Configuration Initialization Functions
-bool setTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout) {
+bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout) {
     if (forceUpTimeout == 0 || forceOnTimeout == 0 || forceDownTimeout == 0 || waitingTimeout == 0) {
         ESP_LOGW(TAG, "Invalid timeout configuration - values cannot be zero");
         return false;
     }
     
     byte data[] = {
-        (uint8_t)(forceUpTimeout & 0xFF),       // ForceUp timeout low byte
-        (uint8_t)(forceUpTimeout >> 8),         // ForceUp timeout high byte
-        (uint8_t)(forceOnTimeout & 0xFF),       // ForceOn timeout low byte
-        (uint8_t)(forceOnTimeout >> 8),         // ForceOn timeout high byte
-        (uint8_t)(forceDownTimeout & 0xFF),     // ForceDown timeout low byte
-        (uint8_t)(forceDownTimeout >> 8),       // ForceDown timeout high byte
-        (uint8_t)(waitingTimeout & 0xFF),       // Waiting timeout low byte
-        (uint8_t)(waitingTimeout >> 8)          // Waiting timeout high byte
+        (uint8_t)(forceUpTimeout >> 8),         // DATA1: ForceUp timeout HIGH byte
+        (uint8_t)(forceUpTimeout & 0xFF),       // DATA2: ForceUp timeout LOW byte
+        (uint8_t)(forceOnTimeout >> 8),         // DATA3: ForceOn timeout HIGH byte
+        (uint8_t)(forceOnTimeout & 0xFF),       // DATA4: ForceOn timeout LOW byte
+        (uint8_t)(forceDownTimeout >> 8),       // DATA5: ForceDown timeout HIGH byte
+        (uint8_t)(forceDownTimeout & 0xFF),     // DATA6: ForceDown timeout LOW byte
+        (uint8_t)(waitingTimeout >> 8),         // DATA7: Waiting timeout HIGH byte
+        (uint8_t)(waitingTimeout & 0xFF)        // DATA8: Waiting timeout LOW byte
     };
+    
+    // Build message to get HEX packet for logging
+    uint8_t buffer[USART_MESSAGE_MAXIMUM_LENGTH];
+    size_t messageSize = buildMessage(buffer, initTout, data, 8);
+    
+    // Create HEX dump string
+    char hexDump[64] = {0};
+    for (size_t i = 0; i < messageSize && i < 16; i++) {
+        snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
+    }
     
     bool success = sendCommandAsync(initTout, data, 8);
     if (success) {
-        ESP_LOGI(TAG, "Timeout configuration set - ForceUp: %d, ForceOn: %d, ForceDown: %d, Waiting: %d", 
-                 forceUpTimeout, forceOnTimeout, forceDownTimeout, waitingTimeout);
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Timeout Config: Up=%d, On=%d, Down=%d, Wait=%d [%s]", 
+                 initTout, forceUpTimeout, forceOnTimeout, forceDownTimeout, waitingTimeout, hexDump);
     }
     return success;
 }
 
-bool setSpeakerVolumeInit(uint8_t volume_0_to_10) {
+bool initSpeakerVolume(uint8_t volume_0_to_10) {
     if (volume_0_to_10 > 10) {
         ESP_LOGW(TAG, "Invalid speaker volume: %d (max: 10)", volume_0_to_10);
         return false;
@@ -1578,7 +1757,7 @@ bool setSpeakerVolumeInit(uint8_t volume_0_to_10) {
     return success;
 }
 
-bool setDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay) {
+bool initDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay) {
     if (poseDetectionDelay == 0 || objectDetectionDelay == 0) {
         ESP_LOGW(TAG, "Invalid detection delay configuration - values cannot be zero");
         return false;
@@ -1597,7 +1776,7 @@ bool setDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDe
     return success;
 }
 
-bool setGyroActiveAngle(uint8_t activeAngle) {
+bool initGyroActiveAngle(uint8_t activeAngle) {
     if (activeAngle > 180) {
         ESP_LOGW(TAG, "Invalid gyro active angle: %d (max: 180)", activeAngle);
         return false;
@@ -1613,7 +1792,7 @@ bool setGyroActiveAngle(uint8_t activeAngle) {
     return success;
 }
 
-bool setGyroRelativeAngle(uint8_t relativeAngle) {
+bool initGyroRelativeAngle(uint8_t relativeAngle) {
     if (relativeAngle > 180) {
         ESP_LOGW(TAG, "Invalid gyro relative angle: %d (max: 180)", relativeAngle);
         return false;
@@ -1630,7 +1809,7 @@ bool setGyroRelativeAngle(uint8_t relativeAngle) {
     return success;
 }
 
-bool setInitialMode(uint8_t mode) {
+bool initDeviceMode(uint8_t mode) {
     if (mode > 1) {
         ESP_LOGW(TAG, "Invalid initial mode: %d (0: AI mode, 1: IMU mode)", mode);
         return false;

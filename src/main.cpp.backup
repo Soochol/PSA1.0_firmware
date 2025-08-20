@@ -1,0 +1,10 @@
+#include <Arduino.h>
+#include "globals.h"
+
+void setup() {
+    pinMode(PWM_ESP_HEATER, OUTPUT);
+    digitalWrite(PWM_ESP_HEATER, HIGH);
+}
+
+void loop() {
+}

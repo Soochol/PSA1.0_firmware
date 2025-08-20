@@ -61,6 +61,10 @@ Kalman_t kalmanR;
 
 void setup() {
 
+    // Set heating available
+    pinMode(PWM_ESP_HEATER, OUTPUT);
+    digitalWrite(PWM_ESP_HEATER, HIGH); // Turn on heater by default
+    
 #ifdef STM_HARDWARE_CONNECTED
     Serial.begin(115200);
     delay(100); // Wait for Serial to initialize

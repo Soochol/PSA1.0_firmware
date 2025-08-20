@@ -435,6 +435,7 @@ bool sendCommandSafe(byte command, const byte* data = nullptr, size_t dataLen = 
 size_t buildMessage(uint8_t* buffer, byte command, const byte* data = nullptr, size_t dataLen = 0);
 void resetParser();
 void parseSensorData(const uint8_t* data, size_t length);
+void logSensorDataFormatted(const SensorReading& reading);
 
 // -----------------------------------------------
 // Asynchronous Communication Management
@@ -473,18 +474,18 @@ void checkCommunicationRecovery();
 // -----------------------------------------------
 // Device Control API (Setters)
 // -----------------------------------------------
-bool setSleepTemperature(float targetTemp, float maxTemp);
-bool setWaitingTemperature(float targetTemp, float maxTemp);
-bool setOperatingTemperature(float targetTemp, float maxTemp);
-bool setUpperTemperatureLimit(float limitTemp);  // DEPRECATED - uses command 0x14
+bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec);
+bool initWaitingTemperature(uint8_t tempInt, uint8_t tempDec);
+bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec);
+bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec);  // DEPRECATED - uses command 0x14
 // bool setHeatPadConfiguration(uint8_t currentLevel, uint8_t maxLevel); // NOT USED
 // bool setFanSpeedRange(uint8_t minSpeed, uint8_t maxSpeed); // NOT USED
-bool setTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);
-bool setDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
-bool setSpeakerVolumeInit(uint8_t volume_0_to_10);
-bool setGyroActiveAngle(uint8_t activeAngle);
-bool setGyroRelativeAngle(uint8_t relativeAngle);
-bool setInitialMode(uint8_t mode);
+bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);
+bool initDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
+bool initSpeakerVolume(uint8_t volume_0_to_10);
+bool initGyroActiveAngle(uint8_t activeAngle);
+bool initGyroRelativeAngle(uint8_t relativeAngle);
+bool initDeviceMode(uint8_t mode);
 bool setDeviceMode(DeviceMode mode);
 bool setFanState(bool enabled);
 bool setFanSpeed(uint8_t speed_0_to_3);
