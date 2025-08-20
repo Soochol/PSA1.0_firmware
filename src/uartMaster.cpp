@@ -395,14 +395,13 @@ bool parseIncomingByte(uint8_t byte) {
             
         case MessageState::READING_DATA:
             if (currentMessage.dataLength > 0 && bufferIndex - 4 < expectedDataLength) {
-                // Check for embedded STM start byte (0x02) which could indicate corrupted stream
-                if (byte == STM && bufferIndex > 4) {
-                    ESP_LOGW(TAG, "[PARSER] Found embedded STM byte (0x02) at data position %d/%d - possible stream corruption", 
+                // CRITICAL: Immediate abort on STM detection - no recursive processing
+                if (byte == STM) {
+                    ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected in DATA at position %d/%d - consecutive message corruption", 
                              bufferIndex - 4, expectedDataLength);
-                    ESP_LOGW(TAG, "[PARSER] Resetting parser to resynchronize with new message");
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
                     resetParser();
-                    // Process this STM byte as potential new message start
-                    return parseIncomingByte(byte);
+                    return false; // Let next iteration handle the STM byte
                 }
                 
                 currentMessage.data[bufferIndex - 4] = byte;
@@ -416,11 +415,12 @@ bool parseIncomingByte(uint8_t byte) {
             break;
             
         case MessageState::READING_CHECKSUM:
-            // Check for unexpected STM byte instead of checksum
+            // CRITICAL: Immediate abort on STM detection - no recursive processing
             if (byte == STM) {
-                ESP_LOGW(TAG, "[PARSER] Found STM byte (0x02) instead of checksum - message corruption detected");
+                ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected instead of CHECKSUM - consecutive message corruption");
+                ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
                 resetParser();
-                return parseIncomingByte(byte);
+                return false; // Let next iteration handle the STM byte
             }
             
             currentMessage.checksum = byte;
@@ -430,18 +430,42 @@ bool parseIncomingByte(uint8_t byte) {
             break;
             
         case MessageState::READING_END:
-            // Check for unexpected STM byte instead of ETX
-            if (byte == STM) {
-                ESP_LOGW(TAG, "[PARSER] Found STM byte (0x02) instead of ETX (0x03) - message corruption detected");
-                resetParser();
-                return parseIncomingByte(byte);
+            {
+                // CRITICAL: Immediate abort on STM detection - no recursive processing
+                if (byte == STM) {
+                    ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected instead of ETX - consecutive message corruption");
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
+                    resetParser();
+                    return false; // Let next iteration handle the STM byte
+                }
+                
+                currentMessage.etx = byte;
+                messageBuffer[bufferIndex++] = byte;
+                
+                // CRITICAL: Force strict message completeness validation
+                size_t expectedTotalLength = currentMessage.length + 2; // +2 for STM and LEN bytes
+                
+                if (bufferIndex != expectedTotalLength) {
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Message length mismatch: got %zu bytes, expected %zu bytes", 
+                             bufferIndex, expectedTotalLength);
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Discarding malformed message - likely consecutive message mixing");
+                    resetParser();
+                    return false;
+                }
+                
+                if (byte != ETX) {
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Invalid ETX: got 0x%02X, expected 0x03 at position %zu", 
+                             byte, bufferIndex - 1);
+                    ESP_LOGW(TAG, "[PARSER] FATAL: Discarding corrupted message");
+                    resetParser();
+                    return false;
+                }
+                
+                // Only declare completion if EVERYTHING is perfect
+                currentState = MessageState::MESSAGE_COMPLETE;
+                ESP_LOGD(TAG, "[PARSER] ETX: 0x%02X at position %zu, message VERIFIED complete", byte, bufferIndex - 1);
+                return true; // Message complete
             }
-            
-            currentMessage.etx = byte;
-            messageBuffer[bufferIndex++] = byte;
-            currentState = MessageState::MESSAGE_COMPLETE;
-            ESP_LOGD(TAG, "[PARSER] ETX: 0x%02X, message complete", byte);
-            return true; // Message complete
             
         default:
             resetParser();
@@ -458,78 +482,51 @@ void resetParser() {
 }
 
 /**
- * @brief Enhanced parser reset with hardware buffer flush and resynchronization
- * @param forceResync If true, performs aggressive resynchronization  
+ * @brief Simplified parser reset with complete buffer flush
+ * @param forceResync If true, performs more aggressive clearing
  */
 void resetParserWithFlush(bool forceResync = false) {
-    // Reset software parser state
+    // Reset software parser state completely
     resetParser();
     
     // Flush hardware UART buffers to clear any remaining data
     STMSerial.flush();
     
-    // Clear receive buffer with STM start byte protection (only for major errors)
+    // SIMPLIFIED: Always clear buffer completely - no preservation attempts
     int bytesCleared = 0;
-    const int maxBytesToClear = forceResync ? 100 : 10;  // Reduced clearing for minor errors
+    const int maxBytesToClear = forceResync ? 200 : 50;  // More aggressive clearing
     
+    // Clear everything from receive buffer
     while (STMSerial.available() && bytesCleared < maxBytesToClear) {
-        uint8_t nextByte = STMSerial.read();
+        uint8_t discardedByte = STMSerial.read();
         bytesCleared++;
         
-        // IMPROVED: Only preserve message starts for serious protocol errors
-        // For checksum errors on well-formed messages, don't try to preserve
-        if (nextByte == STM && STMSerial.available() >= 2 && forceResync) {
-            // Peek at next bytes to confirm this looks like a valid message start
-            uint8_t lengthByte = STMSerial.read();
-            uint8_t directionByte = STMSerial.read();
-            
-            // If this looks like a valid message start, put bytes back and stop
-            if (lengthByte >= 4 && lengthByte <= 0x50 && 
-                (directionByte == MSG_REQUEST || directionByte == MSG_RESPONSE)) {
-                ESP_LOGD(TAG, "[PARSER] Found valid STM message start (0x%02X 0x%02X 0x%02X) - preserving", 
-                         nextByte, lengthByte, directionByte);
-                
-                // We can't put bytes back in Arduino Serial, so mark parser to expect these
-                messageBuffer[0] = nextByte;
-                messageBuffer[1] = lengthByte; 
-                messageBuffer[2] = directionByte;
-                bufferIndex = 3;
-                
-                // Set message fields for preserved bytes
-                currentMessage.stm = nextByte;
-                currentMessage.length = lengthByte;
-                currentMessage.direction = directionByte;
-                
-                // Calculate expectedDataLength ONCE and set state
-                expectedDataLength = lengthByte - 4;  // Total length - (DIR + CMD + CHKSUM + ETX)
-                currentMessage.dataLength = expectedDataLength;
-                currentState = MessageState::READING_COMMAND;  // Read CMD byte next
-                
-                ESP_LOGD(TAG, "[PARSER] Preserved STM message start, continuing from command phase (expLen=%d)", 
-                         expectedDataLength);
-                break;
-            } else {
-                ESP_LOGD(TAG, "[PARSER] False STM start, continuing flush");
-                bytesCleared += 2;  // Count the peeked bytes
-            }
+        // Log first few discarded bytes for debugging
+        if (bytesCleared <= 10) {
+            ESP_LOGD(TAG, "[PARSER] Discarding byte[%d]: 0x%02X", bytesCleared, discardedByte);
         }
         
-        if (forceResync && bytesCleared <= 10) {  // Log fewer bytes
-            ESP_LOGD(TAG, "[PARSER] Discarding byte: 0x%02X", nextByte);
+        // Small delay to prevent overwhelming the system
+        if (bytesCleared % 10 == 0) {
+            vTaskDelay(1 / portTICK_RATE_MS);
         }
-        
-        vTaskDelay(1 / portTICK_RATE_MS);
     }
     
-    if (forceResync) {
-        ESP_LOGW(TAG, "[PARSER] Force resync completed - cleared %d bytes", bytesCleared);
-        // Additional wait for force resync
-        vTaskDelay(10 / portTICK_RATE_MS);
+    // Log completion
+    if (bytesCleared > 0) {
+        ESP_LOGW(TAG, "[PARSER] Complete buffer flush - cleared %d bytes (forceResync=%s)", 
+                 bytesCleared, forceResync ? "true" : "false");
     } else {
-        ESP_LOGD(TAG, "[PARSER] Basic flush completed - cleared %d bytes", bytesCleared);
+        ESP_LOGD(TAG, "[PARSER] Buffer was already empty");
     }
     
-    ESP_LOGD(TAG, "[PARSER] Parser reset with hardware buffer flush completed");
+    // Additional wait for force resync to let STM32 finish transmission
+    if (forceResync) {
+        ESP_LOGW(TAG, "[PARSER] Force resync - waiting 20ms for STM32 to stabilize");
+        vTaskDelay(20 / portTICK_RATE_MS);
+    }
+    
+    ESP_LOGD(TAG, "[PARSER] Simplified parser reset completed - ready for new message");
 }
 
 /**
@@ -1177,7 +1174,7 @@ void usartMasterHandler(void *pvParameters) {
         // Check for command timeouts and handle critical errors
         processCommandTimeout(); 
 
-        vTaskDelay(10 / portTICK_RATE_MS); // More frequent checks for better responsiveness
+        vTaskDelay(5 / portTICK_RATE_MS); // OPTIMIZED: Faster response to consecutive messages (10ms → 5ms)
     }
 }
 
