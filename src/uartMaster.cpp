@@ -133,38 +133,26 @@ uint8_t calculateChecksum(const byte* data, size_t length) {
     // XOR of STM + LEN + DIR + CMD + DATA, initial value: A5h
     uint8_t checksum = 0xA5;  // Initial value A5h
     
-    ESP_LOGD(TAG, "[CHECKSUM] Init: 0xA5, length: %zu", length);
-    
     // STM (data[0])
     checksum ^= data[0];
-    ESP_LOGD(TAG, "[CHECKSUM] After STM(0x%02X): 0x%02X", data[0], checksum);
     
     // LEN (data[1]) 
     checksum ^= data[1];
-    ESP_LOGD(TAG, "[CHECKSUM] After LEN(%d): 0x%02X", data[1], checksum);
     
     // DIR (data[2])
     checksum ^= data[2];
-    ESP_LOGD(TAG, "[CHECKSUM] After DIR(0x%02X): 0x%02X", data[2], checksum);
     
     // CMD (data[3])
     checksum ^= data[3];
-    ESP_LOGD(TAG, "[CHECKSUM] After CMD(0x%02X): 0x%02X", data[3], checksum);
     
     // DATA (data[4] ~ data[length-3])
     size_t dataStart = 4;
     size_t dataEnd = length - 2;  // Exclude CHKSUM and ETX
-    ESP_LOGD(TAG, "[CHECKSUM] Processing DATA bytes %zu to %zu", dataStart, dataEnd - 1);
     
     for (size_t i = dataStart; i < dataEnd; i++) {
-        uint8_t oldChecksum = checksum;
         checksum ^= data[i];
-        if (i < dataStart + 5 || i >= dataEnd - 5) {  // Log first and last 5 bytes only
-            ESP_LOGD(TAG, "[CHECKSUM] DATA[%zu]=0x%02X: 0x%02X -> 0x%02X", i, data[i], oldChecksum, checksum);
-        }
     }
     
-    ESP_LOGD(TAG, "[CHECKSUM] Final calculated checksum: 0x%02X", checksum);
     return checksum;
 }
 
@@ -310,8 +298,6 @@ bool sendCommandSafe(byte command, const byte* data, size_t dataLen) {
  * @return true if complete message parsed, false if still parsing
  */
 bool parseIncomingByte(uint8_t byte) {
-    ESP_LOGD(TAG, "[PARSER] State: %d, Byte: 0x%02X, bufIdx: %d, expLen: %d", 
-             (int)currentState, byte, bufferIndex, expectedDataLength);
     
     switch (currentState) {
         case MessageState::WAITING_START:
@@ -320,7 +306,6 @@ bool parseIncomingByte(uint8_t byte) {
                 currentState = MessageState::READING_LENGTH;
                 bufferIndex = 0;
                 messageBuffer[bufferIndex++] = byte;
-                ESP_LOGD(TAG, "[PARSER] STM found, switching to READING_LENGTH");
             }
             break;
             
@@ -328,30 +313,14 @@ bool parseIncomingByte(uint8_t byte) {
             currentMessage.length = byte;
             messageBuffer[bufferIndex++] = byte;
             
-            // Validate length field - reject obviously invalid lengths
-            if (byte < 4 || byte > 100) {  // Message must have at least DIR+CMD+CHKSUM+ETX (4 bytes)
-                ESP_LOGD(TAG, "[PARSER] Invalid length %d, likely false STM start - resetting", byte);
-                resetParser();
-                return false;
-            }
-            
             currentState = MessageState::READING_DIRECTION;
-            ESP_LOGD(TAG, "[PARSER] Length: %d, switching to READING_DIRECTION", byte);
             break;
             
         case MessageState::READING_DIRECTION:
             currentMessage.direction = byte;
             messageBuffer[bufferIndex++] = byte;
             
-            // Validate direction field - must be MSG_REQUEST (0x20) or MSG_RESPONSE (0x02)
-            if (byte != MSG_REQUEST && byte != MSG_RESPONSE) {
-                ESP_LOGD(TAG, "[PARSER] Invalid direction 0x%02X, likely false STM start - resetting", byte);
-                resetParser();
-                return false;
-            }
-            
             currentState = MessageState::READING_COMMAND;
-            ESP_LOGD(TAG, "[PARSER] Direction: 0x%02X, switching to READING_COMMAND", byte);
             break;
             
         case MessageState::READING_COMMAND:
@@ -364,9 +333,6 @@ bool parseIncomingByte(uint8_t byte) {
                 expectedDataLength = currentMessage.length - 4;
                 currentMessage.dataLength = expectedDataLength;
                 
-                ESP_LOGD(TAG, "[PARSER] Calculating dataLength: %d - 4 = %d", currentMessage.length, expectedDataLength);
-            } else {
-                ESP_LOGD(TAG, "[PARSER] Using pre-calculated dataLength: %d", expectedDataLength);
             }
             
             // CRITICAL BUG FIX: Validate expectedDataLength to prevent infinite loops
@@ -386,84 +352,38 @@ bool parseIncomingByte(uint8_t byte) {
             
             if (expectedDataLength > 0) {
                 currentState = MessageState::READING_DATA;
-                ESP_LOGD(TAG, "[PARSER] Command: 0x%02X, dataLen: %d, switching to READING_DATA", byte, expectedDataLength);
             } else {
                 currentState = MessageState::READING_CHECKSUM;
-                ESP_LOGD(TAG, "[PARSER] Command: 0x%02X, no data, switching to READING_CHECKSUM", byte);
             }
             break;
             
         case MessageState::READING_DATA:
             if (currentMessage.dataLength > 0 && bufferIndex - 4 < expectedDataLength) {
-                // CRITICAL: Immediate abort on STM detection - no recursive processing
-                if (byte == STM) {
-                    ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected in DATA at position %d/%d - consecutive message corruption", 
-                             bufferIndex - 4, expectedDataLength);
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
-                    resetParser();
-                    return false; // Let next iteration handle the STM byte
-                }
                 
                 currentMessage.data[bufferIndex - 4] = byte;
                 messageBuffer[bufferIndex++] = byte;
                 
                 if (bufferIndex - 4 >= expectedDataLength) {
                     currentState = MessageState::READING_CHECKSUM;
-                    ESP_LOGD(TAG, "[PARSER] Data complete, switching to READING_CHECKSUM");
                 }
             }
             break;
             
         case MessageState::READING_CHECKSUM:
-            // CRITICAL: Immediate abort on STM detection - no recursive processing
-            if (byte == STM) {
-                ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected instead of CHECKSUM - consecutive message corruption");
-                ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
-                resetParser();
-                return false; // Let next iteration handle the STM byte
-            }
             
             currentMessage.checksum = byte;
             messageBuffer[bufferIndex++] = byte;
             currentState = MessageState::READING_END;
-            ESP_LOGD(TAG, "[PARSER] Checksum: 0x%02X, switching to READING_END", byte);
             break;
             
         case MessageState::READING_END:
             {
-                // CRITICAL: Immediate abort on STM detection - no recursive processing
-                if (byte == STM) {
-                    ESP_LOGW(TAG, "[PARSER] FATAL: STM byte detected instead of ETX - consecutive message corruption");
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Aborting current message - will catch STM on next iteration");
-                    resetParser();
-                    return false; // Let next iteration handle the STM byte
-                }
-                
                 currentMessage.etx = byte;
                 messageBuffer[bufferIndex++] = byte;
                 
-                // CRITICAL: Force strict message completeness validation
-                size_t expectedTotalLength = currentMessage.length + 2; // +2 for STM and LEN bytes
-                
-                if (bufferIndex != expectedTotalLength) {
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Message length mismatch: got %zu bytes, expected %zu bytes", 
-                             bufferIndex, expectedTotalLength);
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Discarding malformed message - likely consecutive message mixing");
-                    resetParser();
-                    return false;
-                }
-                
-                if (byte != ETX) {
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Invalid ETX: got 0x%02X, expected 0x03 at position %zu", 
-                             byte, bufferIndex - 1);
-                    ESP_LOGW(TAG, "[PARSER] FATAL: Discarding corrupted message");
-                    resetParser();
-                    return false;
-                }
                 
                 // Only declare completion if EVERYTHING is perfect
                 currentState = MessageState::MESSAGE_COMPLETE;
-                ESP_LOGD(TAG, "[PARSER] ETX: 0x%02X at position %zu, message VERIFIED complete", byte, bufferIndex - 1);
                 return true; // Message complete
             }
             
@@ -503,7 +423,7 @@ void resetParserWithFlush(bool forceResync = false) {
         
         // Log first few discarded bytes for debugging
         if (bytesCleared <= 10) {
-            ESP_LOGD(TAG, "[PARSER] Discarding byte[%d]: 0x%02X", bytesCleared, discardedByte);
+            ESP_LOGV(TAG, "[PARSER] Discarding byte[%d]: 0x%02X", bytesCleared, discardedByte);
         }
         
         // Small delay to prevent overwhelming the system
@@ -517,7 +437,7 @@ void resetParserWithFlush(bool forceResync = false) {
         ESP_LOGW(TAG, "[PARSER] Complete buffer flush - cleared %d bytes (forceResync=%s)", 
                  bytesCleared, forceResync ? "true" : "false");
     } else {
-        ESP_LOGD(TAG, "[PARSER] Buffer was already empty");
+        ESP_LOGV(TAG, "[PARSER] Buffer was already empty");
     }
     
     // Additional wait for force resync to let STM32 finish transmission
@@ -526,7 +446,7 @@ void resetParserWithFlush(bool forceResync = false) {
         vTaskDelay(20 / portTICK_RATE_MS);
     }
     
-    ESP_LOGD(TAG, "[PARSER] Simplified parser reset completed - ready for new message");
+    ESP_LOGV(TAG, "[PARSER] Simplified parser reset completed - ready for new message");
 }
 
 /**
@@ -608,20 +528,26 @@ void handleStatusMessage() {
                          currentReading.leftAccel[0] != 0 || currentReading.leftAccel[1] != 0 || currentReading.leftAccel[2] != 0 ||
                          currentReading.rightAccel[0] != 0 || currentReading.rightAccel[1] != 0 || currentReading.rightAccel[2] != 0);
         
-        // Build abbreviated HEX dump (core sensor data only: pressure + temp + voltage)
-        char hexDump[64] = {0};
-        size_t startIdx = 24; // Skip IMU data (24 bytes), start from pressure sensors
-        for (size_t i = startIdx; i < startIdx + 10 && i < currentMessage.dataLength; i++) {
-            snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", currentMessage.data[i]);
+        // Log consolidated STATUS message with detailed IMU data
+        if (imuActive) {
+            ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X) | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | L_Gyro:[%d,%d,%d] L_Acc:[%d,%d,%d] | R_Gyro:[%d,%d,%d] R_Acc:[%d,%d,%d] | IMU_EVT:0x%02X/0x%02X",
+                     statMessage,
+                     leftPressure, rightPressure,
+                     outsideTemp, boardTemp, actuatorTemp,
+                     batteryVoltage, objectDistance, actuatorDisp,
+                     currentReading.leftGyro[0], currentReading.leftGyro[1], currentReading.leftGyro[2],
+                     currentReading.leftAccel[0], currentReading.leftAccel[1], currentReading.leftAccel[2],
+                     currentReading.rightGyro[0], currentReading.rightGyro[1], currentReading.rightGyro[2],
+                     currentReading.rightAccel[0], currentReading.rightAccel[1], currentReading.rightAccel[2],
+                     currentReading.leftIMUEvent, currentReading.rightIMUEvent);
+        } else {
+            ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X), IMU:OFF | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X",
+                     statMessage,
+                     leftPressure, rightPressure,
+                     outsideTemp, boardTemp, actuatorTemp,
+                     batteryVoltage, objectDistance, actuatorDisp,
+                     currentReading.leftIMUEvent, currentReading.rightIMUEvent);
         }
-        
-        // Log consolidated STATUS message
-        ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X), IMU:%s | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X [%s]",
-                 statMessage, imuActive ? "ON" : "OFF",
-                 leftPressure, rightPressure,
-                 outsideTemp, boardTemp, actuatorTemp,
-                 batteryVoltage, objectDistance, actuatorDisp,
-                 currentReading.leftIMUEvent, currentReading.rightIMUEvent, hexDump);
         
         sendResponse(currentMessage.command);
         
@@ -724,15 +650,25 @@ void handleEventMessage() {
             break;
         case evtInitResult:  // 0x81
             ESP_LOGI(TAG, "STM init complete");
+
             initSleepTemperature(30, 0);
             initWaitingTemperature(38, 0);
             initOperatingTemperature(66, 0);
             initUpperTemperatureLimit(80, 0);
             initTimeoutConfiguration(10, 60, 60, 250);
+
             break;
         case evtMode:        // 0x82
             ESP_LOGI(TAG, "Mode change event");
+
+            initSleepTemperature(30, 0);
+            initWaitingTemperature(38, 0);
+            initOperatingTemperature(48, 0);
+            initUpperTemperatureLimit(80, 0);
+            initTimeoutConfiguration(10, 60, 60, 250);
+
             handleModeChangeEvent();
+            
             break;
         default:
             ESP_LOGW(TAG, "Unknown event: 0x%02X (%s)", 
@@ -990,31 +926,39 @@ void usartMasterHandler(void *pvParameters) {
         // }
         
         int bytesAvailable = STMSerial.available();
-        if (bytesAvailable > 0) {
-            ESP_LOGD(TAG, "[UART] %d bytes available, parser state: %d", bytesAvailable, (int)currentState);
-        }
         
         while (STMSerial.available()) {
             uint8_t incomingByte = STMSerial.read();
             
             // Prevent buffer overflow
             if (bufferIndex >= USART_MESSAGE_MAXIMUM_LENGTH) {
-                ESP_LOGW(TAG, "[STM-ERR] Buffer overflow, resetting parser");
+                // Show what we have and reset
+                printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+                for (size_t i = 0; i < bufferIndex; i++) {
+                    printf("%02X ", messageBuffer[i]);
+                }
+                printf("(OVERFLOW %zu bytes)\n", bufferIndex);
                 resetParser();
                 continue;
             }
             
-            // State machine based parsing
-            if (parseIncomingByte(incomingByte)) {
+            // Try parsing
+            bool messageComplete = parseIncomingByte(incomingByte);
+            
+            // If buffer seems stuck (no STM found for a while), show what we have
+            if (!messageComplete && bufferIndex > 50 && currentState == MessageState::WAITING_START) {
+                printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+                for (size_t i = 0; i < bufferIndex; i++) {
+                    printf("%02X ", messageBuffer[i]);
+                }
+                printf("(NO_STM %zu bytes)\n", bufferIndex);
+                resetParser();
+                continue;
+            }
+            
+            if (messageComplete) {
                 // Message complete - create hex dump with STRICT message boundary
                 size_t expectedTotalLength = currentMessage.length + 2; // +2 for STM and LEN bytes
-                
-                // CRITICAL: Only show exactly the message bytes, ignore any extra buffer content
-                char hexDump[512] = {0};
-                for (size_t i = 0; i < expectedTotalLength && i < bufferIndex; i++) {
-                    snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), 
-                             "%02X ", messageBuffer[i]);
-                }
                 
                 // Log warning if buffer contains more than expected (consecutive message detection)
                 if (bufferIndex > expectedTotalLength) {
@@ -1022,20 +966,22 @@ void usartMasterHandler(void *pvParameters) {
                     ESP_LOGD(TAG, "[MESSAGE-BOUNDARY] Detected %zu extra bytes in buffer - likely consecutive message", extraBytes);
                 }
                 
-                // Differentiate logging by command type
+                // Raw packet logging and message info
+                // Show raw packet data for debugging
+                printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+                for (size_t i = 0; i < expectedTotalLength && i < bufferIndex; i++) {
+                    printf("%02X ", messageBuffer[i]);
+                }
+                printf("(%zu bytes)\n", bufferIndex);
+                
                 if (currentMessage.command == statMessage) {
-                    // For sensor data, detailed logging is handled in handleStatusMessage()
-                    // Only log HEX dump in DEBUG level for debugging
-                    ESP_LOGD(TAG, "[HEX] %s→ %s", hexDump, getCommandName(currentMessage.command));
-                    ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
-                             currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
+                    // For sensor data, minimal logging (detailed in handleStatusMessage)
                 } else {
-                    // For other commands, show full HEX dump
-                    ESP_LOGI(TAG, "[STM→ESP] %s→ %s", hexDump, getCommandName(currentMessage.command));
-                    // Always log HEX dump in DEBUG level for debugging
-                    ESP_LOGD(TAG, "[HEX] %s→ %s", hexDump, getCommandName(currentMessage.command));
-                    ESP_LOGD(TAG, "[DEBUG] Message length: LEN=0x%02X (%d), Expected total=%zu, Actual buffer=%zu", 
-                             currentMessage.length, currentMessage.length, expectedTotalLength, bufferIndex);
+                    // For other commands, show first 8 bytes only
+                    ESP_LOGI(TAG, "[STM→ESP] %s, LEN=%d, First8: %02X %02X %02X %02X %02X %02X %02X %02X", 
+                             getCommandName(currentMessage.command), currentMessage.length,
+                             messageBuffer[0], messageBuffer[1], messageBuffer[2], messageBuffer[3],
+                             messageBuffer[4], messageBuffer[5], messageBuffer[6], messageBuffer[7]);
                 }
                 
                 // Enhanced protocol validation with command-type-specific direction checking
@@ -1083,14 +1029,13 @@ void usartMasterHandler(void *pvParameters) {
                     ESP_LOGW(TAG, "[STM-ERR] Checksum FAIL: received=0x%02X, calculated=0x%02X", 
                              currentMessage.checksum, calculatedChecksum);
                     
-                    // Check if this is a well-formed message (correct length + ETX) with just checksum issue
-                    bool wellFormedMessage = (bufferIndex == expectedTotalLength) && 
-                                           (currentMessage.etx == ETX) && 
-                                           (currentMessage.stm == STM);
+                    
+                    // Check if this is a well-formed message - relaxed conditions for debugging
+                    bool wellFormedMessage = (currentMessage.stm == STM) && 
+                                           (bufferIndex >= 6); // At least STM+LEN+DIR+CMD+CHKSUM+ETX
+                    
                     
                     if (wellFormedMessage) {
-                        ESP_LOGD(TAG, "[CHECKSUM] Well-formed message with checksum mismatch - likely data corruption during transmission");
-                        ESP_LOGD(TAG, "[CHECKSUM] Attempting to process message despite checksum error");
                         // Continue processing instead of recovery - message structure is correct
                     } else {
                         ESP_LOGW(TAG, "[CHECKSUM] Message malformed - applying recovery mechanism");
@@ -1780,10 +1725,10 @@ const char* getCommandName(uint8_t command) {
         case initTempSleep:     return "INIT: Sleep Temperature";
         case initTempWaiting:   return "INIT: Waiting Temperature";
         case initTempForceUp:   return "INIT: Operating Temperature";
-        case initTempHeatPad:   return "INIT: Heat Pad Temperature";
+        case initTempHeatPad:   return "INIT: Heat Pad Temperature (DEPRECATED)";
         case initPWMCoolFan:    return "INIT: Cooling Fan PWM";
         case initTout:          return "INIT: Timeout Settings";
-        case initTempLimit:     return "INIT: Upper Temperature Limit (DEPRECATED)";
+        case initTempLimit:     return "INIT: Upper Temperature Limit";
         case initSpk:           return "INIT: Speaker Volume";
         case initDelay:         return "INIT: Detection Delay";
         case initGyroAct:       return "INIT: Heating Angle (IMU Active)";
@@ -1938,8 +1883,7 @@ bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec) {
 }
 
 bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec) {
-    // DEPRECATED: This function uses deprecated command 0x14 (initTempLimit)
-    ESP_LOGW(TAG, "WARNING: initUpperTemperatureLimit uses DEPRECATED command 0x14");
+    // Uses command 0x14 (initTempLimit) - valid command
     
     if (tempInt > 100 || tempDec > 99) {
         ESP_LOGW(TAG, "Invalid temperature - %d.%02d", tempInt, tempDec);
@@ -1961,9 +1905,9 @@ bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandFireAndForget(initTempLimit, data, 2); // DEPRECATED initTempLimit command
+    bool success = sendCommandFireAndForget(initTempLimit, data, 2); // initTempLimit command
     if (success) {
-        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Upper Temp Limit: %d.%02d°C [%s] (DEPRECATED)", 
+        ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Upper Temp Limit: %d.%02d°C [%s]", 
                  initTempLimit, tempInt, tempDec, hexDump);
     }
     return success;

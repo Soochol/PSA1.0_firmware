@@ -68,7 +68,9 @@ void setup() {
 #ifdef STM_HARDWARE_CONNECTED
     Serial.begin(115200);
     delay(100); // Wait for Serial to initialize
-    esp_log_level_set("*", ESP_LOG_INFO); // Ensure INFO level logging
+    esp_log_level_set("*", ESP_LOG_ERROR); // Hide almost everything  
+    esp_log_level_set(TAG, ESP_LOG_INFO); // Allow main setup messages
+    esp_log_level_set("/home/blessp/my_code/PSA1.0_firmware-master/src/uartMaster.cpp", ESP_LOG_INFO); // Allow STATUS messages only
     ESP_LOGI(TAG, "=== PSA1.0 FIRMWARE SETUP START (STM HARDWARE MODE) ===");
     ESP_LOGI(TAG, "[DEBUG] ESP_LOG initialized on UART0 (USB), STM communication on UART2");
 #else

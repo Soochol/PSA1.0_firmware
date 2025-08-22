@@ -44,8 +44,8 @@
 #define initTempSleep   0x10    // Set sleep mode temperature
 #define initTempWaiting 0x11    // Set waiting mode temperature
 #define initTempForceUp 0x12    // Set force-up mode temperature
-#define initTempHeatPad 0x13    // Set heat pad temperature
-#define initTempLimit   0x14    // Set upper temperature limit - DEPRECATED
+#define initTempHeatPad 0x13    // Set heat pad temperature - DEPRECATED
+#define initTempLimit   0x14    // Set upper temperature limit
 #define initPWMCoolFan  0x15    // Set cooling fan PWM level
 #define initTout        0x16    // Set timeout values
 #define initSpk         0x17    // Set speaker volume
@@ -441,6 +441,7 @@ void logSensorDataFormatted(const SensorReading& reading);
 // Asynchronous Communication Management
 // -----------------------------------------------
 bool sendCommandAsync(uint8_t command, const byte* data = nullptr, size_t dataLen = 0);
+bool sendCommandFireAndForget(uint8_t command, const byte* data = nullptr, size_t dataLen = 0);
 void handleInitResponse();
 void handleRequestResponse();
 void handleControlResponse();
@@ -477,7 +478,7 @@ void checkCommunicationRecovery();
 bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec);
 bool initWaitingTemperature(uint8_t tempInt, uint8_t tempDec);
 bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec);
-bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec);  // DEPRECATED - uses command 0x14
+bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec);  // Uses command 0x14
 // bool setHeatPadConfiguration(uint8_t currentLevel, uint8_t maxLevel); // NOT USED
 // bool setFanSpeedRange(uint8_t minSpeed, uint8_t maxSpeed); // NOT USED
 bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);

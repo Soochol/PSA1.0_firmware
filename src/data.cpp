@@ -195,7 +195,6 @@ uint16_t tinyMLDataClass::addData(allData_t allData) {
 
     tofBuffer[index] = allData.lmaLength;
 
-    ESP_LOGI(TAG, "%d, %d, %d, %d, %d, %d, %d, %d, %d", adsRBuffer[index], gyroRXBuffer[index], gyroRYBuffer[index], gyroRZBuffer[index], adsLBuffer[index], gyroLXBuffer[index], gyroLYBuffer[index], gyroLZBuffer[index], tofBuffer[index]);
     index += 1;
 
     return index;
