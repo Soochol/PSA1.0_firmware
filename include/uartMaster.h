@@ -79,8 +79,7 @@
 #define ctrlHeatPadOn   0x57    // Turn heat pad on/off
 #define ctrlHeatPadTemp 0x58    // Set heat pad temperature
 #define ctrlForceUp     0x59    // Force Up mode (ON=1 only)
-#define ctrlPose        0x5A    // Enable/disable pose detection (moved from 0x59)
-#define ctrlWaiting     0x60    // Force Down mode (ON=1 only)
+#define ctrlForceDown   0x60    // Force Down mode (ON=1 only)
 #define ctrlSleeping    0x61    // Sleep mode (ON=1 only)
 
 // STATUS Commands (0x70-0x7F) - Status and sensor data
@@ -93,6 +92,18 @@
 
 // ERROR Commands (0x90-0x9F) - Error notifications
 #define errInit         0x90    // Initialization error
+
+// Error code bit masks for errInit (0x90)
+#define ERR_IR_TEMP      0x0001  // IR temperature error
+#define ERR_AMB_TEMP     0x0002  // Ambient temperature error
+#define ERR_IMU          0x0004  // IMU error
+#define ERR_FAN          0x0008  // Fan error
+#define ERR_COOL_FAN     0x0010  // Cooling fan error
+#define ERR_TOF          0x0020  // TOF error
+#define ERR_AUDIO        0x0040  // Audio error
+#define ERR_FSR          0x0080  // FSR error
+#define ERR_SD_CARD      0x0100  // SD card error
+#define ERR_MP3_FILE     0x0200  // MP3 file error
 
 // =============================================================================
 // Enum Definitions
@@ -117,7 +128,8 @@ enum class DeviceMode : uint8_t {
     FORCE_ON = 3,   // Maintaining raised posture
     FORCE_DOWN = 4, // Lowering posture
     IMU = 5,        // IMU motion tracking mode
-    ERROR = 6       // System error state
+    TEST = 6,       // Test mode
+    ERROR = 7       // System error state
 };
 
 /**
@@ -150,6 +162,20 @@ enum class CommandState : uint8_t {
 enum class ResponseType : uint8_t {
     ACK_ONLY = 0,       // INIT and CONTROL commands expect only ACK
     DATA_RESPONSE = 1   // REQUEST commands expect data response
+};
+
+/**
+ * @brief Operating temperature level presets for force-up mode
+ * 
+ * Predefined temperature values for different operating modes:
+ * - FORCE_HIGH: 66°C - High temperature operation
+ * - FORCE_NORMAL: 58°C - Normal temperature operation  
+ * - FORCE_LOW: 52°C - Low temperature operation
+ */
+enum class OperatingTempLevel : uint8_t {
+    FORCE_HIGH = 66,    // High temperature mode
+    FORCE_NORMAL = 58,  // Normal temperature mode
+    FORCE_LOW = 52      // Low temperature mode
 };
 
 // Timeout constants (milliseconds)
@@ -467,8 +493,7 @@ bool manualRecoveryFromCriticalError();
 // -----------------------------------------------
 void handleCommunicationError(uint32_t currentTime);
 void enterCriticalErrorState();
-void emergencyShutdownActuators();
-void setSystemErrorMode();
+void emergencyShutdown();
 void notifySystemError();
 void checkCommunicationRecovery();
 
@@ -478,18 +503,20 @@ void checkCommunicationRecovery();
 bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec);
 bool initWaitingTemperature(uint8_t tempInt, uint8_t tempDec);
 bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec);
+bool initOperatingTemperature(OperatingTempLevel level);
 bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec);  // Uses command 0x14
 // bool setHeatPadConfiguration(uint8_t currentLevel, uint8_t maxLevel); // NOT USED
 // bool setFanSpeedRange(uint8_t minSpeed, uint8_t maxSpeed); // NOT USED
 bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);
-bool initDetectionDelayConfiguration(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
+bool initCoolingFanPWM(uint8_t currentLevel, uint8_t maxLevel);
+bool initForeDownDelay(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
 bool initSpeakerVolume(uint8_t volume_0_to_10);
 bool initGyroActiveAngle(uint8_t activeAngle);
 bool initGyroRelativeAngle(uint8_t relativeAngle);
 bool initDeviceMode(uint8_t mode);
 bool setDeviceMode(DeviceMode mode);
-bool setFanState(bool enabled);
-bool setFanSpeed(uint8_t speed_0_to_3);
+bool setBlowerFanState(bool enabled);
+bool setBlowerFanSpeed(uint8_t speed_0_to_3);
 bool setCoolingFanState(bool enabled);
 bool setCoolingFanLevel(uint8_t level);
 bool setHeatPadState(bool enabled);  // DEPRECATED - ctrlHeatPadOn not supported
@@ -498,7 +525,6 @@ bool setSpeakerVolume(uint8_t volume_0_to_10);
 bool setForceUpMode();
 bool setForceDownMode(); 
 bool setSleepingMode();
-bool setPoseDetectionMode(bool enabled);  // DEPRECATED - use Force mode functions
 
 // -----------------------------------------------
 // Data Retrieval API (Getters)
@@ -530,6 +556,7 @@ bool requestSleepTemperature();
 bool requestWaitingTemperature();
 bool requestOperatingTemperature();
 bool requestUpperTemperatureLimit();
+bool requestTimeoutConfiguration();
 bool requestCoolingFanLevel();
 bool requestSpeakerVolume();
 bool requestDetectionDelay();

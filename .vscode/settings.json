@@ -71,5 +71,16 @@
         "chrono": "cpp"
     },
     "C_Cpp.errorSquiggles": "Disabled",
-    "claudeCodeChat.permissions.yoloMode": false
+    "claudeCodeChat.permissions.yoloMode": false,
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
+    "files.refetchOnWindowFocus": true,
+    "files.useExperimentalFileWatcher": "on",
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/**": true,
+        "**/platformio/.pio/**": true,
+        "**/.pio/**": true
+    }
 }
