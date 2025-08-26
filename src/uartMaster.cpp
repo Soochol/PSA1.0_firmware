@@ -50,12 +50,12 @@ static size_t expectedDataLength = 0;                             // Expected da
 // -----------------------------------------------
 // Sensor Data Management
 // -----------------------------------------------
-static bool sensorDataAvailable = false;                          // Flag indicating new sensor data ready
 
 // -----------------------------------------------
 // Device State Tracking
 // -----------------------------------------------
-static DeviceMode currentStmMode = DeviceMode::WAITING;        // Current STM32 operating mode (default: WAITING)
+static DeviceMode currentStmState = DeviceMode::WAITING;        // Current STM32 operating mode (default: WAITING)
+static OperationMode currentOperationMode = OperationMode::IMU_MODE;  // Current operation mode (default: IMU_MODE)
 static uint8_t lastErrorCode = 0;                                 // Last error code received from STM (0 = no error)
 
 // -----------------------------------------------
@@ -79,6 +79,7 @@ static uint8_t consecutiveTimeouts = 0;                           // Count of co
 static uint8_t consecutiveChecksumErrors = 0;                      // Count of consecutive checksum errors  
 static uint8_t consecutiveProtocolErrors = 0;                      // Count of consecutive protocol errors
 static uint32_t lastProtocolErrorTime = 0;                         // Timestamp of last protocol error
+static bool criticalErrorHandled = false;                          // Flag to prevent duplicate critical error processing
 
 // -----------------------------------------------
 // Message Construction Working Variables
@@ -505,109 +506,143 @@ void handleConsecutiveErrors(const char* errorType) {
 
 // Message type specific handlers
 void handleStatusMessage() {
-    if (currentMessage.command == statMessage) {
-        parseSensorData(currentMessage.data, currentMessage.dataLength);
-        sensorDataAvailable = true;
+    parseSensorData(currentMessage.data, currentMessage.dataLength);
+    
+    sendResponse(currentMessage.command);
+    
+    // Maintain existing TinyML logic
+    biosigData1Min.addData(allData);
+    predictionInput.addData(allData);
+    
+    // TinyML inference and STM control logic
+    if (predictionInput.index >= TINYML_BUFFER_LEN && 
+        predictionInput.tof1SecMin < TOF_THRESHOLD && 
+        predictionInput.tofBuffer[TINYML_BUFFER_LEN-1] > predictionInput.tofBuffer[TINYML_BUFFER_LEN - 2] + 10) {
         
-        // Create consolidated log for STATUS message (like INIT commands)
-        SensorReading currentReading = getCurrentSensorData();
+        tinyMLInferenceResult = tinyMLInference(predictionInput);
         
-        // Convert sensor values for display
-        float leftPressure = currentReading.leftPressure / 100.0f;
-        float rightPressure = currentReading.rightPressure / 100.0f;
-        float outsideTemp = currentReading.outsideTemp / 100.0f;
-        float boardTemp = currentReading.boardTemp / 100.0f;
-        float actuatorTemp = currentReading.actuatorTemp / 100.0f;
-        float batteryVoltage = currentReading.batteryVoltage / 100.0f;
-        float objectDistance = currentReading.objectDistance / 100.0f;
-        float actuatorDisp = currentReading.actuatorDisplacement / 100.0f;
-        
-        // Check if IMU is active
-        bool imuActive = (currentReading.leftGyro[0] != 0 || currentReading.leftGyro[1] != 0 || currentReading.leftGyro[2] != 0 ||
-                         currentReading.rightGyro[0] != 0 || currentReading.rightGyro[1] != 0 || currentReading.rightGyro[2] != 0 ||
-                         currentReading.leftAccel[0] != 0 || currentReading.leftAccel[1] != 0 || currentReading.leftAccel[2] != 0 ||
-                         currentReading.rightAccel[0] != 0 || currentReading.rightAccel[1] != 0 || currentReading.rightAccel[2] != 0);
-        
-        // Log consolidated STATUS message with detailed IMU data
-        /*
-        if (imuActive) {
-            ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X) | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | L_Gyro:[%d,%d,%d] L_Acc:[%d,%d,%d] | R_Gyro:[%d,%d,%d] R_Acc:[%d,%d,%d] | IMU_EVT:0x%02X/0x%02X",
-                     statMessage,
-                     leftPressure, rightPressure,
-                     outsideTemp, boardTemp, actuatorTemp,
-                     batteryVoltage, objectDistance, actuatorDisp,
-                     currentReading.leftGyro[0], currentReading.leftGyro[1], currentReading.leftGyro[2],
-                     currentReading.leftAccel[0], currentReading.leftAccel[1], currentReading.leftAccel[2],
-                     currentReading.rightGyro[0], currentReading.rightGyro[1], currentReading.rightGyro[2],
-                     currentReading.rightAccel[0], currentReading.rightAccel[1], currentReading.rightAccel[2],
-                     currentReading.leftIMUEvent, currentReading.rightIMUEvent);
-        } else {
-            ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X), IMU:OFF | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X",
-                     statMessage,
-                     leftPressure, rightPressure,
-                     outsideTemp, boardTemp, actuatorTemp,
-                     batteryVoltage, objectDistance, actuatorDisp,
-                     currentReading.leftIMUEvent, currentReading.rightIMUEvent);
+        if (tinyMLInferenceResult == 1) { 
+            finalResult += 1; 
+        } else { 
+            finalResult = 0; 
         }
-        */
-        
-        sendResponse(currentMessage.command);
-        
-        // Maintain existing TinyML logic
-        biosigData1Min.addData(allData);
-        predictionInput.addData(allData);
-        
-        // TinyML inference and STM control logic
-        if (predictionInput.index >= TINYML_BUFFER_LEN && 
-            predictionInput.tof1SecMin < TOF_THRESHOLD && 
-            predictionInput.tofBuffer[TINYML_BUFFER_LEN-1] > predictionInput.tofBuffer[TINYML_BUFFER_LEN - 2] + 10) {
-            
-            tinyMLInferenceResult = tinyMLInference(predictionInput);
-            
-            if (tinyMLInferenceResult == 1) { 
-                finalResult += 1; 
-            } else { 
-                finalResult = 0; 
-            }
 
 #ifdef ADJUST_TINYML_PREDICTION
-            if (predictionInput.calculateTofSlope(15, 3)) {
-                ESP_LOGI(TAG, "Original: %d, adjusted prediction result to 1", tinyMLInferenceResult);
-                tinyMLInferenceResult = 1;                       
-                finalResult = 2;
-            }
+        if (predictionInput.calculateTofSlope(15, 3)) {
+            ESP_LOGI(TAG, "Original: %d, adjusted prediction result to 1", tinyMLInferenceResult);
+            tinyMLInferenceResult = 1;                       
+            finalResult = 2;
+        }
 #endif
-        }
-        
-        // STM FORCE_UP control
-        if (finalResult == 2) {
-            ESP_LOGI(TAG, "[STM-SIM] TinyML trigger detected: ToF=%d, sending CONTROL: Set Device Mode to FORCE_UP", 
-                     predictionInput.tofBuffer[TINYML_BUFFER_LEN-1]);
-            setDeviceMode(DeviceMode::FORCE_UP);
-            finalResult = 0;
-        }
-        
-        // TODO: Add FORCE_DOWN control logic
-        // - Detect condition for FORCE_DOWN (e.g., specific sensor pattern, timeout, or user input)
-        // - Send setDeviceMode(DeviceMode::FORCE_DOWN) command
-        // - Log appropriate message for debugging
     }
+    
+    // STM FORCE_UP control
+    if (finalResult == 2) {
+        ESP_LOGI(TAG, "[STM-SIM] TinyML trigger detected: ToF=%d, sending CONTROL: Set Device Mode to FORCE_UP", 
+                 predictionInput.tofBuffer[TINYML_BUFFER_LEN-1]);
+        setDeviceMode(DeviceMode::FORCE_UP);
+        finalResult = 0;
+    }
+    
+    // TODO: Add FORCE_DOWN control logic
+    // - Detect condition for FORCE_DOWN (e.g., specific sensor pattern, timeout, or user input)
+    // - Send setDeviceMode(DeviceMode::FORCE_DOWN) command
+    // - Log appropriate message for debugging
+}
+
+/**
+ * @brief Safely update STM state with validation and logging
+ * @param modeValue Device mode value (0-5: SLEEP, WAITING, FORCE_UP, FORCE_ON, FORCE_DOWN, ERROR)
+ * @return true if mode is valid and updated successfully, false otherwise
+ */
+bool updateStmState(uint8_t modeValue) {
+    // Validate device mode range
+    if (modeValue > 5) {
+        ESP_LOGW(TAG, "Invalid device mode: %d (valid range: 0-5)", modeValue);
+        return false;
+    }
+    
+    // Safe enum casting
+    currentStmState = static_cast<DeviceMode>(modeValue);
+    
+    // Consistent logging
+    const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
+    ESP_LOGI(TAG, "STM state updated to %s (%d)", modeNames[modeValue], modeValue);
+    
+    // Additional logging for ERROR mode
+    if (currentStmState == DeviceMode::ERROR) {
+        ESP_LOGW(TAG, "STM entered ERROR mode - will be handled by main loop");
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Safely update STM state with DeviceMode enum (no validation needed)
+ * @param mode Device mode enum value
+ * @return true (always succeeds with valid enum)
+ */
+bool updateStmState(DeviceMode mode) {
+    // Direct assignment - no validation needed for enum type
+    currentStmState = mode;
+    
+    // Consistent logging
+    const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "ERROR"};
+    uint8_t modeValue = static_cast<uint8_t>(mode);
+    ESP_LOGI(TAG, "STM state updated to %s (%d)", modeNames[modeValue], modeValue);
+    
+    // Additional logging for ERROR mode
+    if (currentStmState == DeviceMode::ERROR) {
+        ESP_LOGW(TAG, "STM entered ERROR mode - will be handled by main loop");
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Safely update ESP system state with validation and logging
+ * @param newState New system state to set
+ * @return true if state was updated successfully, false otherwise
+ */
+bool updateEspState(SystemState newState) {
+    // Store previous state for logging
+    SystemState previousState = currentEspState;
+    
+    // Update state
+    currentEspState = newState;
+    
+    // Consistent logging with state names
+    const char* stateNames[] = {"NORMAL", "COMMUNICATION_ERROR", "CRITICAL_ERROR"};
+    const char* prevStateName = stateNames[static_cast<uint8_t>(previousState)];
+    const char* newStateName = stateNames[static_cast<uint8_t>(newState)];
+    
+    // Log state change
+    if (previousState != newState) {
+        ESP_LOGW(TAG, "System state changed: %s → %s", prevStateName, newStateName);
+        
+        // Additional logging for critical transitions
+        if (newState == SystemState::CRITICAL_ERROR) {
+            ESP_LOGE(TAG, "*** CRITICAL ERROR STATE ENTERED ***");
+        } else if (previousState == SystemState::CRITICAL_ERROR && newState == SystemState::NORMAL) {
+            ESP_LOGI(TAG, "*** RECOVERED FROM CRITICAL ERROR ***");
+        }
+    }
+    
+    return true;
 }
 
 // Mode change event handler
 void handleModeChangeEvent() {
     if (currentMessage.dataLength > 0) {
         uint8_t modeValue = currentMessage.data[0];
-        if (modeValue <= 7) {  // Valid mode range: 0-7
-            currentStmMode = static_cast<DeviceMode>(modeValue);
-            const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "TEST", "ERROR"};
-            ESP_LOGI(TAG, "Mode: %s (%d)", modeNames[modeValue], modeValue);
-            
-            switch (currentStmMode) {
+
+        // Update current STM state using safe function
+        if (updateStmState(modeValue)) {
+            // Handle mode-specific logic
+            switch (currentStmState) {
                 case DeviceMode::SLEEP:
                     // TODO: Implement SLEEP mode handling
                     ESP_LOGI(TAG, "Sleep mode activated");
-
                     break;
                     
                 case DeviceMode::WAITING:
@@ -630,26 +665,14 @@ void handleModeChangeEvent() {
                     ESP_LOGI(TAG, "Force Down mode activated");
                     break;
                     
-                case DeviceMode::IMU:
-                    // TODO: Implement IMU mode handling
-                    ESP_LOGI(TAG, "IMU mode activated");
-                    break;
-                    
-                case DeviceMode::TEST:
-                    // TODO: Implement TEST mode handling
-                    ESP_LOGI(TAG, "TEST mode activated");
-                    break;
-                    
                 case DeviceMode::ERROR:
-                    ESP_LOGW(TAG, "STM entered ERROR mode - will be handled by main loop");
+                    // Error logging is handled in setDeviceMode()
                     break;
                     
                 default:
-                    ESP_LOGW(TAG, "Unknown mode: %d", modeValue);
+                    // This case is now handled in setDeviceMode()
                     break;
             }
-        } else {
-            ESP_LOGW(TAG, "Invalid mode value received: %d", modeValue);
         }
     } else {
         ESP_LOGW(TAG, "Mode change event without data");
@@ -674,7 +697,6 @@ void handleEventMessage() {
             initSleepTemperature(32, 0);
 
             initTimeoutConfiguration(10, 60, 60, 250);  //forceup, forceon, forcedown, waiting
-
             
             initCoolingFanPWM(10, 10);  // pwm range 0-10, max pwm 10
             initSpeakerVolume(5);
@@ -683,7 +705,7 @@ void handleEventMessage() {
             initGyroActiveAngle(20);
             initGyroRelativeAngle(5);
 
-            initDeviceMode(1);    //imu mode
+            initDeviceMode(1);    //imu mode, it should be set to ai mode later
 
             break;
 
@@ -740,8 +762,7 @@ void handleErrorMessage() {
     }
     
     // STM sent error message, so update STM state to ERROR
-    currentStmMode = DeviceMode::ERROR;
-    ESP_LOGW(TAG, "STM mode set to ERROR due to error message");
+    updateStmState(DeviceMode::ERROR);
     
     // STM error will be handled by main loop state check
     
@@ -1152,18 +1173,49 @@ void usartMasterHandler(void *pvParameters) {
         // Check for command timeouts and handle critical errors
         processCommandTimeout(); 
         
+        // ESP State Change Conditions:
+        // COMMUNICATION_ERROR: On timeout (processCommandTimeout → handleCommunicationError)
+        // CRITICAL_ERROR: 1) STM ERROR mode 2) Consecutive timeout limit 3) Prolonged no response 4) Manual entry
+        
         // === Centralized Error State Management ===
-        // Check ESP state - if already in critical error, minimize processing
+        // Check ESP state and handle recovery or emergency procedures
         if (currentEspState == SystemState::CRITICAL_ERROR) {
-            // Already in critical error - only maintain minimal operations
+            if (!criticalErrorHandled) {
+                // First time entering critical error state - execute emergency procedures
+                ESP_LOGE(TAG, "=== ENTERING CRITICAL ERROR STATE ===");
+                ESP_LOGE(TAG, "STM communication completely failed");
+                ESP_LOGE(TAG, "Shutting down actuators for safety");
+                
+                // Execute emergency safety measures
+                emergencyShutdown();
+                notifySystemError();
+                criticalErrorHandled = true;
+                
+                ESP_LOGE(TAG, "=== SYSTEM IN SAFE MODE ===");
+            }
+            // After emergency handling, maintain minimal operations only
             vTaskDelay(pdMS_TO_TICKS(1000));  // Longer delay to reduce CPU usage
             continue;
+        } else if (currentEspState == SystemState::COMMUNICATION_ERROR) {
+            // Communication error recovery - check if communication is restored
+            static uint32_t lastRecoveryCheck = 0;
+            uint32_t currentTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            
+            // Check recovery every 1 second to avoid excessive processing
+            if (currentTime - lastRecoveryCheck >= 1000) {
+                ESP_LOGI(TAG, "Communication recovered - returning to normal state");
+                consecutiveTimeouts = 0;
+                updateStmState(DeviceMode::SLEEP);  // Reset STM state to SLEEP
+                updateEspState(SystemState::NORMAL);
+                lastRecoveryCheck = currentTime;
+            }
         }
         
-        // Check STM state - if STM is in ERROR mode, enter critical state
-        if (currentStmMode == DeviceMode::ERROR) {
-            ESP_LOGW(TAG, "STM in ERROR mode - entering ESP critical state");
-            enterCriticalErrorState();
+        // STM State Change to ERROR: Only when STM32 sends ERROR message (0x90) via handleErrorMessage()
+        // Check STM state - if STM is in error state, enter critical state
+        if (currentStmState == DeviceMode::ERROR) {
+            ESP_LOGW(TAG, "STM in error state - entering ESP critical state");
+            updateEspState(SystemState::CRITICAL_ERROR);
         }
 
         vTaskDelay(5 / portTICK_RATE_MS); // OPTIMIZED: Faster response to consecutive messages (10ms → 5ms)
@@ -1210,11 +1262,6 @@ void handleInitResponse() {
         ESP_LOGI(TAG, "INIT ACK received for command 0x%02X (%s) (slot %d)", 
                  currentMessage.command, getCommandName(currentMessage.command), slot);
         
-        // Communication recovery check
-        if (currentEspState != SystemState::NORMAL) {
-            checkCommunicationRecovery();
-        }
-        
         // Clear completed command
         pendingCommands[slot].reset();
     } else {
@@ -1242,16 +1289,11 @@ void handleRequestResponse() {
             snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", currentMessage.data[i]);
         }
         
-        // Communication recovery check
-        if (currentEspState != SystemState::NORMAL) {
-            checkCommunicationRecovery();
-        }
-        
         // Process response data and create unified log based on command type
         switch (currentMessage.command) {
             case reqTempSleep:      // 0x30
                 if (currentMessage.dataLength >= 2) {
-                    systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    systemConfig.sleepTemp = currentMessage.data[0] + (currentMessage.data[1] / 100.0f);
                     ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Sleep Temp: %.1f°C [%s]", 
                              currentMessage.command, systemConfig.sleepTemp, hexDump);
                 } else {
@@ -1262,7 +1304,7 @@ void handleRequestResponse() {
                 
             case reqTempWaiting:    // 0x31
                 if (currentMessage.dataLength >= 2) {
-                    systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    systemConfig.waitingTemp = currentMessage.data[0] + (currentMessage.data[1] / 100.0f);
                     ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Waiting Temp: %.1f°C [%s]", 
                              currentMessage.command, systemConfig.waitingTemp, hexDump);
                 } else {
@@ -1273,7 +1315,7 @@ void handleRequestResponse() {
                 
             case reqTempForceUp:    // 0x32
                 if (currentMessage.dataLength >= 2) {
-                    systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    systemConfig.operatingTemp = currentMessage.data[0] + (currentMessage.data[1] / 100.0f);
                     ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Operating Temp: %.1f°C [%s]", 
                              currentMessage.command, systemConfig.operatingTemp, hexDump);
                 } else {
@@ -1289,7 +1331,7 @@ void handleRequestResponse() {
                 
             case reqUpperTemp:      // 0x34
                 if (currentMessage.dataLength >= 2) {
-                    systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 10.0f);
+                    systemConfig.upperTempLimit = currentMessage.data[0] + (currentMessage.data[1] / 100.0f);
                     ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Upper Temp Limit: %.1f°C [%s]", 
                              currentMessage.command, systemConfig.upperTempLimit, hexDump);
                 } else {
@@ -1419,11 +1461,6 @@ void handleControlResponse() {
         pendingCommands[slot].state = CommandState::ACK_RECEIVED;
         ESP_LOGI(TAG, "CONTROL ACK received for command 0x%02X (%s) (slot %d)", 
                  currentMessage.command, getCommandName(currentMessage.command), slot);
-        
-        // Communication recovery check
-        if (currentEspState != SystemState::NORMAL) {
-            checkCommunicationRecovery();
-        }
         
         // Clear completed command
         pendingCommands[slot].reset();
@@ -1567,7 +1604,7 @@ void handleCommunicationError(uint32_t currentTime) {
     // Check for critical communication failure conditions
     if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
         ESP_LOGE(TAG, "CRITICAL COMMUNICATION FAILURE - Too many consecutive timeouts (%d)", consecutiveTimeouts);
-        enterCriticalErrorState();
+        updateEspState(SystemState::CRITICAL_ERROR);
         return;
     }
     
@@ -1576,19 +1613,18 @@ void handleCommunicationError(uint32_t currentTime) {
         (currentTime - lastCommunicationError) < CRITICAL_ERROR_THRESHOLD) {
         ESP_LOGE(TAG, "CRITICAL COMMUNICATION FAILURE - No response for %lu ms", 
                  currentTime - lastCommunicationError);
-        enterCriticalErrorState();
+        updateEspState(SystemState::CRITICAL_ERROR);
         return;
     }
     
     // Set communication error state (but not critical yet)
     if (currentEspState == SystemState::NORMAL) {
-        currentEspState = SystemState::COMMUNICATION_ERROR;
-        ESP_LOGW(TAG, "System state changed to COMMUNICATION_ERROR");
+        updateEspState(SystemState::COMMUNICATION_ERROR);
     }
 }
 
 void enterCriticalErrorState() {
-    currentEspState = SystemState::CRITICAL_ERROR;
+    updateEspState(SystemState::CRITICAL_ERROR);
     
     ESP_LOGE(TAG, "=== ENTERING CRITICAL ERROR STATE ===");
     ESP_LOGE(TAG, "STM communication completely failed");
@@ -1610,7 +1646,7 @@ void emergencyShutdown() {
     // STM 제어 장치 (통신 가능한 경우)
     setBlowerFanState(false);           // 송풍 팬 끄기
     setCoolingFanState(true);           // 냉각팬 켜기 (히터 잔열 제거)
-    // setDeviceMode(DeviceMode::ERROR) 제거 - STM과 통신 불가능한 상태일 수 있음
+    // STM error state는 currentStmState로 추적됨 - STM과 통신 불가능한 상태일 수 있음
     
     ESP_LOGE(TAG, "Emergency shutdown completed");
 }
@@ -1630,22 +1666,6 @@ void notifySystemError() {
     ESP_LOGE(TAG, "SYSTEM ERROR NOTIFICATION: STM communication failure");
 }
 
-void checkCommunicationRecovery() {
-    // Communication recovered - reset timeout counters
-    consecutiveTimeouts = 0;
-    
-    if (currentEspState == SystemState::COMMUNICATION_ERROR) {
-        ESP_LOGI(TAG, "Communication recovered - returning to normal state");
-        currentEspState = SystemState::NORMAL;
-        
-        // TODO: Add any recovery procedures here
-        // restoreNormalOperation();
-    } else if (currentEspState == SystemState::CRITICAL_ERROR) {
-        ESP_LOGW(TAG, "Communication recovered but system still in critical error");
-        ESP_LOGW(TAG, "Manual intervention may be required for full recovery");
-        // Critical error requires manual recovery
-    }
-}
 
 // System state query functions
 SystemState getCurrentSystemState() {
@@ -1661,21 +1681,6 @@ bool isCommunicationHealthy() {
     return (currentEspState == SystemState::NORMAL && consecutiveTimeouts == 0);
 }
 
-bool manualRecoveryFromCriticalError() {
-    if (currentEspState == SystemState::CRITICAL_ERROR) {
-        ESP_LOGW(TAG, "Manual recovery initiated from critical error state");
-        currentEspState = SystemState::NORMAL;
-        consecutiveTimeouts = 0;
-        lastCommunicationError = 0;
-        
-        // TODO: Add system reinitialization if needed
-        // reinitializeSystem();
-        
-        ESP_LOGI(TAG, "System manually recovered from critical error");
-        return true;
-    }
-    return false;
-}
 
 // =============================================================================
 // Error Handling and Diagnostic Functions
@@ -2082,6 +2087,30 @@ bool initGyroRelativeAngle(uint8_t relativeAngle) {
     return success;
 }
 
+/**
+ * @brief Safely set operation mode with validation and logging
+ * @param mode Operation mode value (0: AI_MODE, 1: IMU_MODE)
+ * @return true if mode is valid and set successfully, false otherwise
+ */
+bool setOperationMode(uint8_t mode) {
+    // Validate operation mode range
+    if (mode > 1) {
+        ESP_LOGW(TAG, "Invalid operation mode: %d (valid range: 0-1)", mode);
+        return false;
+    }
+    
+    // Safe enum casting
+    currentOperationMode = static_cast<OperationMode>(mode);
+    
+    // Consistent logging
+    const char* modeNames[] = {"AI mode", "IMU mode"};
+    ESP_LOGI(TAG, "Operation mode set to %s (%d)", modeNames[mode], mode);
+    ESP_LOGI(TAG, "ESP can %ssend 0x51 commands", 
+             isAIModeActive() ? "" : "NOT ");
+    
+    return true;
+}
+
 bool initDeviceMode(uint8_t mode) {
     if (mode > 1) {
         ESP_LOGW(TAG, "Invalid initial mode: %d (0: AI mode, 1: IMU mode)", mode);
@@ -2092,9 +2121,14 @@ bool initDeviceMode(uint8_t mode) {
     
     bool success = sendCommandAsync(initMode, data, 1);
     if (success) {
-        const char* modeNames[] = {"AI mode", "IMU mode"};
-        ESP_LOGI(TAG, "Initial mode set to %s (%d) - Command: 0x%02X (%s)", 
-                 modeNames[mode], mode, initMode, getCommandName(initMode));
+        // Update current operation mode tracking using safe function
+        if (setOperationMode(mode)) {
+            ESP_LOGI(TAG, "Initial mode command sent successfully - Command: 0x%02X (%s)", 
+                     initMode, getCommandName(initMode));
+        } else {
+            ESP_LOGW(TAG, "Failed to set operation mode after successful command send");
+            success = false;
+        }
     }
     return success;
 }
@@ -2213,11 +2247,21 @@ bool resetDevice() {
 
 // Device Mode Control Functions
 bool setDeviceMode(DeviceMode mode) {
+    // Check if ESP is allowed to send device mode commands
+    if (!isAIModeActive()) {
+        const char* currentModeNames[] = {"AI", "IMU"};
+        uint8_t modeIndex = (getCurrentOperationMode() == OperationMode::AI_MODE) ? 0 : 1;
+        ESP_LOGW(TAG, "Cannot send ctrlMode (0x51) command: ESP is in %s mode. Only AI mode allows ESP to control device modes.",
+                 currentModeNames[modeIndex]);
+        ESP_LOGW(TAG, "Use initDeviceMode(0) to switch to AI mode first, or let STM handle mode changes in IMU mode.");
+        return false;
+    }
+    
     byte data[] = {static_cast<byte>(mode)};
     
     bool success = sendCommandAsync(ctrlMode, data, 1);
     if (success) {
-        const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN", "IMU", "TEST", "ERROR"};
+        const char* modeNames[] = {"SLEEP", "WAITING", "FORCE_UP", "FORCE_ON", "FORCE_DOWN"};
         ESP_LOGI(TAG, "Device mode set to %s - Command: 0x%02X (%s)", 
                  modeNames[static_cast<int>(mode)], ctrlMode, getCommandName(ctrlMode));
     }
@@ -2387,7 +2431,17 @@ SensorReading getCurrentSensorData() {
 
 DeviceMode getCurrentMode() {
     // Return the actual tracked device mode updated by event messages
-    return currentStmMode;
+    return currentStmState;
+}
+
+OperationMode getCurrentOperationMode() {
+    // Return the current operation mode (AI_MODE or IMU_MODE)
+    return currentOperationMode;
+}
+
+bool isAIModeActive() {
+    // Return true if ESP is allowed to send 0x51 commands (AI mode active)
+    return currentOperationMode == OperationMode::AI_MODE;
 }
 
 bool isPoseDetectionMode() {

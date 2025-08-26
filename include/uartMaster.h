@@ -121,8 +121,6 @@
  * - FORCE_UP: Actively raising user posture
  * - FORCE_ON: Maintaining raised posture
  * - FORCE_DOWN: Lowering user posture
- * - IMU: IMU-based motion tracking mode
- * - ERROR: System error state
  */
 enum class DeviceMode : uint8_t {
     SLEEP = 0,      // Device in sleep mode
@@ -130,9 +128,21 @@ enum class DeviceMode : uint8_t {
     FORCE_UP = 2,   // Actively raising posture
     FORCE_ON = 3,   // Maintaining raised posture
     FORCE_DOWN = 4, // Lowering posture
-    IMU = 5,        // IMU motion tracking mode
-    TEST = 6,       // Test mode
-    ERROR = 7       // System error state
+    ERROR = 5       // STM in error state
+};
+
+/**
+ * @brief Device operation control mode
+ * 
+ * Defines who controls the device force up/down operations:
+ * - AI_MODE: ESP32 controls force up/down (ESP sends 0x51 commands)
+ * - IMU_MODE: STM32 controls force up/down (ESP cannot send 0x51 commands)
+ * 
+ * System always starts in IMU_MODE as agreed between ESP and STM.
+ */
+enum class OperationMode : uint8_t {
+    AI_MODE = 0,    // ESP controls force up/down operations
+    IMU_MODE = 1    // STM controls force up/down operations
 };
 
 /**
@@ -498,7 +508,6 @@ uint8_t getCommandRetryCount();
 SystemState getCurrentSystemState();
 bool isSystemInErrorState();
 bool isCommunicationHealthy();
-bool manualRecoveryFromCriticalError();
 
 // -----------------------------------------------
 // Critical Error Management
@@ -507,7 +516,6 @@ void handleCommunicationError(uint32_t currentTime);
 void enterCriticalErrorState();
 void emergencyShutdown();
 void notifySystemError();
-void checkCommunicationRecovery();
 
 // -----------------------------------------------
 // Device Control API (Setters)
@@ -527,6 +535,12 @@ bool initGyroActiveAngle(uint8_t activeAngle);
 bool initGyroRelativeAngle(uint8_t relativeAngle);
 bool initDeviceMode(uint8_t mode);
 bool initPWMFanSpeed(uint8_t fanSpeed);
+
+// Safe mode setting functions with validation
+bool setOperationMode(uint8_t mode);
+bool updateStmState(uint8_t modeValue);      // For raw protocol values
+bool updateStmState(DeviceMode mode);        // For direct enum assignment
+bool updateEspState(SystemState newState);  // For centralized ESP state management
 bool setDeviceMode(DeviceMode mode);
 bool setBlowerFanState(bool enabled);
 bool setBlowerFanSpeed(uint8_t speed_0_to_3);  // DEPRECATED - Use initPWMFanSpeed() instead
@@ -544,6 +558,8 @@ bool setSleepingMode();  // DEPRECATED - Use setDeviceMode(DeviceMode::SLEEP) in
 // -----------------------------------------------
 SensorReading getCurrentSensorData();
 DeviceMode getCurrentMode();
+OperationMode getCurrentOperationMode();
+bool isAIModeActive();
 uint8_t getLastErrorCode();
 float getSleepTemperature();
 float getWaitingTemperature();

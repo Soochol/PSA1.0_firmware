@@ -240,8 +240,10 @@ void executeCommand(uint8_t commandCode) {
                 defaultValue = 10; // 10 * 100ms = 1 second
                 maxVal = 100;      // Max 10 seconds
             } else if (strstr(cmd->paramNames[i], "mode") != nullptr) {
-                defaultValue = 0;  // Mode 0 (AI mode for initMode, SLEEP for ctrlMode)
-                maxVal = 7;        // Max mode 7
+                // For initMode (0x21): default to IMU mode as agreed between ESP and STM
+                // For ctrlMode (0x51): default to SLEEP mode  
+                defaultValue = (commandCode == initMode) ? 1 : 0;  // IMU mode for initMode, SLEEP for ctrlMode
+                maxVal = (commandCode == initMode) ? 1 : 4;        // Max mode 1 for initMode, 4 for ctrlMode
             } else if (strstr(cmd->paramNames[i], "on_off") != nullptr || strcmp(cmd->paramNames[i], "1") == 0) {
                 defaultValue = 1;  // ON
                 maxVal = 1;        // Only 0 or 1
