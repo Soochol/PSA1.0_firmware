@@ -17,7 +17,7 @@
 
 #define BR_BUFFER_SIZE 6
 
-uint8_t calculateBR(int16_t inputArray[BIOSIG_BUFFER_LEN]);  // breathing rate, motion range
+uint8_t calculateBR(int16_t inputArray[600]);  // breathing rate, motion range
 int sort_desc(const void *cmp1, const void *cmp2);
 uint8_t convert_int16_to_uint8(int16_t value);
 float tilt_calculation(float ax1, float ay1, float az1, float gyro_y1, float ax2, float ay2, float az2, float gyro_y2);
