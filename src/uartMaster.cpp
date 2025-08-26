@@ -529,6 +529,7 @@ void handleStatusMessage() {
                          currentReading.rightAccel[0] != 0 || currentReading.rightAccel[1] != 0 || currentReading.rightAccel[2] != 0);
         
         // Log consolidated STATUS message with detailed IMU data
+        /*
         if (imuActive) {
             ESP_LOGI(TAG, "[STATUS] STM → ESP (0x%02X) | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | L_Gyro:[%d,%d,%d] L_Acc:[%d,%d,%d] | R_Gyro:[%d,%d,%d] R_Acc:[%d,%d,%d] | IMU_EVT:0x%02X/0x%02X",
                      statMessage,
@@ -548,6 +549,7 @@ void handleStatusMessage() {
                      batteryVoltage, objectDistance, actuatorDisp,
                      currentReading.leftIMUEvent, currentReading.rightIMUEvent);
         }
+        */
         
         sendResponse(currentMessage.command);
         
@@ -687,7 +689,6 @@ void handleEventMessage() {
 
         case evtMode:        // 0x82
             ESP_LOGI(TAG, "Mode change event");
-그거 머
             handleModeChangeEvent();
             
             break;
@@ -959,11 +960,13 @@ void usartMasterHandler(void *pvParameters) {
             // Prevent buffer overflow
             if (bufferIndex >= USART_MESSAGE_MAXIMUM_LENGTH) {
                 // Show what we have and reset
+                /*
                 printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
                 for (size_t i = 0; i < bufferIndex; i++) {
                     printf("%02X ", messageBuffer[i]);
                 }
                 printf("(OVERFLOW %zu bytes)\n", bufferIndex);
+                */
                 resetParser();
                 continue;
             }
@@ -973,11 +976,13 @@ void usartMasterHandler(void *pvParameters) {
             
             // If buffer seems stuck (no STM found for a while), show what we have
             if (!messageComplete && bufferIndex > 50 && currentState == MessageState::WAITING_START) {
+                /*
                 printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
                 for (size_t i = 0; i < bufferIndex; i++) {
                     printf("%02X ", messageBuffer[i]);
                 }
                 printf("(NO_STM %zu bytes)\n", bufferIndex);
+                */
                 resetParser();
                 continue;
             }
@@ -994,11 +999,13 @@ void usartMasterHandler(void *pvParameters) {
                 
                 // Raw packet logging and message info
                 // Show raw packet data for debugging
+                /*
                 printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
                 for (size_t i = 0; i < expectedTotalLength && i < bufferIndex; i++) {
                     printf("%02X ", messageBuffer[i]);
                 }
                 printf("(%zu bytes)\n", bufferIndex);
+                */
                 
                 if (currentMessage.command == statMessage) {
                     // For sensor data, minimal logging (detailed in handleStatusMessage)
