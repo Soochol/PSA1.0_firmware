@@ -676,9 +676,9 @@ void handleEventMessage() {
             initTimeoutConfiguration(10, 60, 60, 250);  //forceup, forceon, forcedown, waiting
 
             
-            initCoolingFanPWM(1, 10);  // pwm range 0-10, max pwm 10
-            initSpeakerVolume(7);
-            initForeDownDelay(3, 3);
+            initCoolingFanPWM(10, 10);  // pwm range 0-10, max pwm 10
+            initSpeakerVolume(5);
+            initForeDownDelay(3);
 
             initGyroActiveAngle(20);
             initGyroRelativeAngle(5);
@@ -1336,14 +1336,13 @@ void handleRequestResponse() {
                 }
                 break;
                 
-            case reqDelay:          // 0x38
-                if (currentMessage.dataLength >= 2) {
-                    systemConfig.poseDetectionDelay = currentMessage.data[0];    // 100ms units
-                    systemConfig.objectDetectionDelay = currentMessage.data[1];  // 100ms units
-                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), Detection Delay: Pose=%ds, Object=%ds [%s]", 
-                             currentMessage.command, systemConfig.poseDetectionDelay, systemConfig.objectDetectionDelay, hexDump);
+            case reqDelay:          // 0x38 - ForceDown delay
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.forceDownDelay = currentMessage.data[0];
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), ForceDown Delay: %d [%s]", 
+                             currentMessage.command, systemConfig.forceDownDelay, hexDump);
                 } else {
-                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Detection Delay: INVALID DATA (len=%d) [%s]", 
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), ForceDown Delay: INVALID DATA (len=%d) [%s]", 
                              currentMessage.command, currentMessage.dataLength, hexDump);
                 }
                 break;
@@ -1771,7 +1770,7 @@ const char* getCommandName(uint8_t command) {
         case reqPWMCoolFan:     return "REQUEST: Cooling Fan Level";
         case reqTimeout:        return "REQUEST: Timeout Settings";
         case reqSpk:            return "REQUEST: Speaker Volume";
-        case reqDelay:          return "REQUEST: Detection Delay";
+        case reqDelay:          return "REQUEST: ForceDown Delay";
         case reqGyroAct:        return "REQUEST: Heating Angle (IMU Active)";
         case reqGyroRel:        return "REQUEST: Cooling Angle (IMU Relative)";
         case reqMode:           return "REQUEST: Current Mode";
@@ -2019,21 +2018,20 @@ bool initCoolingFanPWM(uint8_t currentLevel, uint8_t maxLevel) {
     return success;
 }
 
-bool initForeDownDelay(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay) {
-    if (poseDetectionDelay == 0 || objectDetectionDelay == 0) {
-        ESP_LOGW(TAG, "Invalid detection delay configuration - values cannot be zero");
+bool initForeDownDelay(uint8_t forceDownDelay) {
+    // Range validation: 0-20
+    if (forceDownDelay > 20) {
+        ESP_LOGW(TAG, "Invalid forceDownDelay value %d - must be 0-20", forceDownDelay);
         return false;
     }
     
     byte data[] = {
-        poseDetectionDelay,     // Pose detection delay (100ms units)
-        objectDetectionDelay    // Object detection delay (100ms units)
+        forceDownDelay     // ForceDown delay value
     };
     
-    bool success = sendCommandAsync(initDelay, data, 2);
+    bool success = sendCommandAsync(initDelay, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Detection delay configuration set - pose: %d×100ms, object: %d×100ms", 
-                 poseDetectionDelay, objectDetectionDelay);
+        ESP_LOGI(TAG, "ForceDown delay set to %d", forceDownDelay);
     }
     return success;
 }
@@ -2427,12 +2425,8 @@ uint16_t getWaitingTimeout() {
 }
 
 // Detection Configuration Getters
-uint8_t getPoseDetectionDelay() {
-    return systemConfig.poseDetectionDelay;
-}
-
-uint8_t getObjectDetectionDelay() {
-    return systemConfig.objectDetectionDelay;
+uint8_t getForceDownDelay() {
+    return systemConfig.forceDownDelay;
 }
 
 // Gyro Configuration Getters (Korean Protocol)

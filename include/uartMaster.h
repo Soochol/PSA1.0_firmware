@@ -54,7 +54,7 @@
 #define initGyroRel     0x20    // Set cooling angle (IMU relative angle)
 #define initMode        0x21    // Set mode change (0: AI mode, 1: IMU mode)
 
-// REQUEST Commands (0x30-0x41) - Query current parameter values
+// REQUEST Commands (0x30-0x49) - Query current parameter values
 #define reqTempSleep    0x30    // Get sleep mode temperature
 #define reqTempWaiting  0x31    // Get waiting mode temperature
 #define reqTempForceUp  0x32    // Get force-up mode temperature
@@ -63,12 +63,12 @@
 #define reqPWMCoolFan   0x35    // Get cooling fan PWM level
 #define reqTimeout      0x36    // Get timeout values
 #define reqSpk          0x37    // Get speaker volume
-#define reqDelay        0x38    // Get detection delay values
+#define reqDelay        0x38    // Get ForceDown delay value
 #define reqGyroAct      0x39    // Get heating angle (IMU active angle)
 #define reqGyroRel      0x40    // Get cooling angle (IMU relative angle)
 #define reqMode         0x41    // Get current mode (0: AI mode, 1: IMU mode)
 
-// CONTROL Commands (0x50-0x61) - Real-time device control (Korean Protocol)
+// CONTROL Commands (0x50-0x69) - Real-time device control (Korean Protocol)
 #define ctrlReset       0x50    // Reset device
 #define ctrlMode        0x51    // Set device operating mode
 #define ctrlSpkVol      0x52    // Set speaker volume
@@ -82,15 +82,16 @@
 #define ctrlForceDown   0x60    // Force Down mode (ON=1 only)
 #define ctrlSleeping    0x61    // Sleep mode (ON=1 only)
 
-// STATUS Commands (0x70-0x7F) - Status and sensor data
+// STATUS Commands (0x70-0x79) - Status and sensor data
 #define statMessage     0x70    // Sensor data message from STM
 
-// EVENT Commands (0x80-0x8F) - System events and notifications
-#define evtInitStart    0x80    // Initialization started event
+// EVENT Commands (0x80-0x89) - System events and notifications
+#define evtInitStart    0x80    // Initialization started event// STATUS Commands (0x70-0x7F) - Status and sensor data
+
 #define evtInitResult   0x81    // Initialization result event
 #define evtMode         0x82    // Device mode change event
 
-// ERROR Commands (0x90-0x9F) - Error notifications
+// ERROR Commands (0x90-0x99) - Error notifications
 #define errInit         0x90    // Initialization error
 
 // Error code bit masks for errInit (0x90)
@@ -290,13 +291,15 @@ enum class MessageState : uint8_t {
  * - ERROR (0x90): Error and fault notifications
  */
 enum class CommandType : uint8_t {
-    INIT = 0x10,    // Initialization commands
-    REQUEST = 0x30, // Data request commands
-    CONTROL = 0x50, // Control commands
-    STATUS = 0x70,  // Status messages
-    EVENT = 0x80,   // Event notifications
-    ERROR = 0x90    // Error notifications
+    INIT = 0x10,    // Initialization commands (0x10-0x29)
+    REQUEST = 0x30, // Data request commands (0x30-0x49)
+    CONTROL = 0x50, // Control commands (0x50-0x69)
+    STATUS = 0x70,  // Status messages (0x70-0x79)
+    EVENT = 0x80,   // Event notifications (0x80-0x89)
+    ERROR = 0x90,   // Error notifications (0x90-0x99)
+    UNKNOWN = 0xFF  // Unknown command type
 };
+
 
 // =============================================================================
 // Data Structures
@@ -427,6 +430,7 @@ struct ProtocolMessage {
                 }
                 break;
                 
+            case CommandType::UNKNOWN:
             default:
                 if (errorMsg) *errorMsg = "Unknown command type for direction validation";
                 return false;
@@ -435,9 +439,15 @@ struct ProtocolMessage {
         return true;
     }
     
-    // Extract command category from command code upper nibble
+    // Extract command category from command code based on ranges
     CommandType getCommandType() const {
-        return static_cast<CommandType>(command & 0xF0);
+        if (command >= 0x10 && command <= 0x29) return CommandType::INIT;      // INIT 범위
+        if (command >= 0x30 && command <= 0x49) return CommandType::REQUEST;   // REQUEST 범위  
+        if (command >= 0x50 && command <= 0x69) return CommandType::CONTROL;   // CONTROL 범위
+        if (command >= 0x70 && command <= 0x79) return CommandType::STATUS;    // STATUS 범위
+        if (command >= 0x80 && command <= 0x89) return CommandType::EVENT;     // EVENT 범위
+        if (command >= 0x90 && command <= 0x99) return CommandType::ERROR;     // ERROR 범위
+        return CommandType::UNKNOWN;
     }
 };
 
@@ -509,7 +519,7 @@ bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec);  // Uses comma
 // bool setFanSpeedRange(uint8_t minSpeed, uint8_t maxSpeed); // NOT USED
 bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, uint16_t forceDownTimeout, uint16_t waitingTimeout);
 bool initCoolingFanPWM(uint8_t currentLevel, uint8_t maxLevel);
-bool initForeDownDelay(uint8_t poseDetectionDelay, uint8_t objectDetectionDelay);
+bool initForeDownDelay(uint8_t forceDownDelay);
 bool initSpeakerVolume(uint8_t volume_0_to_10);
 bool initGyroActiveAngle(uint8_t activeAngle);
 bool initGyroRelativeAngle(uint8_t relativeAngle);
@@ -543,8 +553,7 @@ uint16_t getForceUpTimeout();
 uint16_t getForceOnTimeout();
 uint16_t getForceDownTimeout();
 uint16_t getWaitingTimeout();
-uint8_t getPoseDetectionDelay();
-uint8_t getObjectDetectionDelay();
+uint8_t getForceDownDelay();
 uint8_t getGyroActiveAngle();
 uint8_t getGyroRelativeAngle();
 uint8_t getCurrentModeValue();

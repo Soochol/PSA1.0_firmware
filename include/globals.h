@@ -354,8 +354,7 @@ typedef struct {
     uint16_t forceOnTimeout;
     uint16_t forceDownTimeout;
     uint16_t waitingTimeout;
-    uint8_t poseDetectionDelay;
-    uint8_t objectDetectionDelay;
+    uint8_t forceDownDelay;
     uint8_t gyroActiveAngle;
     uint8_t gyroRelativeAngle;
     uint8_t currentModeValue;
