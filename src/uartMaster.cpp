@@ -1182,33 +1182,19 @@ void usartMasterHandler(void *pvParameters) {
         if (currentEspState == SystemState::CRITICAL_ERROR) {
             if (!criticalErrorHandled) {
                 // First time entering critical error state - execute emergency procedures
-                ESP_LOGE(TAG, "=== ENTERING CRITICAL ERROR STATE ===");
-                ESP_LOGE(TAG, "STM communication completely failed");
-                ESP_LOGE(TAG, "Shutting down actuators for safety");
+                enterCriticalErrorState();
                 
-                // Execute emergency safety measures
-                emergencyShutdown();
-                notifySystemError();
                 criticalErrorHandled = true;
-                
-                ESP_LOGE(TAG, "=== SYSTEM IN SAFE MODE ===");
             }
             // After emergency handling, maintain minimal operations only
             vTaskDelay(pdMS_TO_TICKS(1000));  // Longer delay to reduce CPU usage
             continue;
         } else if (currentEspState == SystemState::COMMUNICATION_ERROR) {
-            // Communication error recovery - check if communication is restored
-            static uint32_t lastRecoveryCheck = 0;
-            uint32_t currentTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            
-            // Check recovery every 1 second to avoid excessive processing
-            if (currentTime - lastRecoveryCheck >= 1000) {
-                ESP_LOGI(TAG, "Communication recovered - returning to normal state");
-                consecutiveTimeouts = 0;
-                updateStmState(DeviceMode::SLEEP);  // Reset STM state to SLEEP
-                updateEspState(SystemState::NORMAL);
-                lastRecoveryCheck = currentTime;
-            }
+            // Communication error state - recovery happens only when:
+            // 1. Successful command response is received
+            // 2. Manual intervention occurs  
+            // 3. System restart/reset
+            // No automatic recovery to avoid false assumptions
         }
         
         // STM State Change to ERROR: Only when STM32 sends ERROR message (0x90) via handleErrorMessage()
@@ -1645,7 +1631,7 @@ void emergencyShutdown() {
     
     // STM 제어 장치 (통신 가능한 경우)
     setBlowerFanState(false);           // 송풍 팬 끄기
-    setCoolingFanState(true);           // 냉각팬 켜기 (히터 잔열 제거)
+    setCoolingFanState(false);           // 냉각팬 끄기 (히터 잔열 제거)
     // STM error state는 currentStmState로 추적됨 - STM과 통신 불가능한 상태일 수 있음
     
     ESP_LOGE(TAG, "Emergency shutdown completed");
