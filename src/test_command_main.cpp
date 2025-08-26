@@ -52,6 +52,7 @@ static const CommandTest commands[] = {
     {initGyroAct, "initGyroAct", "Set heating angle (IMU active angle)", 1, {"active_angle"}},
     {initGyroRel, "initGyroRel", "Set cooling angle (IMU relative angle)", 1, {"relative_angle"}},
     {initMode, "initMode", "Set mode change (0: AI mode, 1: IMU mode)", 1, {"mode"}},
+    {initPWMFan, "initPWMFan", "Set PWM fan speed (0-3)", 1, {"fan_speed"}},
     
     // REQUEST Commands (0x30-0x41)
     {reqTempSleep, "reqTempSleep", "Get sleep mode temperature", 0, {}},
@@ -65,18 +66,19 @@ static const CommandTest commands[] = {
     {reqGyroAct, "reqGyroAct", "Get heating angle (IMU active angle)", 0, {}},
     {reqGyroRel, "reqGyroRel", "Get cooling angle (IMU relative angle)", 0, {}},
     {reqMode, "reqMode", "Get current mode", 0, {}},
+    {reqPWMFan, "reqPWMFan", "Get PWM fan speed", 0, {}},
     
     // CONTROL Commands (0x50-0x61)
     {ctrlReset, "ctrlReset", "Reset device", 0, {}},
     {ctrlMode, "ctrlMode", "Set device operating mode", 1, {"mode"}},
-    {ctrlSpkVol, "ctrlSpkVol", "Set speaker volume", 1, {"volume_0_to_10"}},
+    {ctrlSpkOn, "ctrlSpkOn", "Turn speaker on/off", 1, {"on_off_1_0"}},
     {ctrlFanOn, "ctrlFanOn", "Turn main fan on/off", 1, {"on_off_1_0"}},
-    {ctrlFanPWM, "ctrlFanPWM", "Set main fan speed (0-3)", 1, {"speed_0_to_3"}},
+    {ctrlFanPWM, "ctrlFanPWM", "Set main fan speed (0-3) - DEPRECATED: Use initPWMFan (0x22)", 1, {"speed_0_to_3"}},
     {ctrlCoolFanOn, "ctrlCoolFanOn", "Turn cooling fan on/off", 1, {"on_off_1_0"}},
-    {ctrlCoolFanPWM, "ctrlCoolFanPWM", "Set cooling fan PWM level", 1, {"pwm_level"}},
-    {ctrlForceUp, "ctrlForceUp", "Force Up mode (ON=1 only)", 1, {"1"}},
-    {ctrlForceDown, "ctrlForceDown", "Force Down mode (ON=1 only)", 1, {"1"}},
-    {ctrlSleeping, "ctrlSleeping", "Sleep mode (ON=1 only)", 1, {"1"}}
+    {ctrlCoolFanPWM, "ctrlCoolFanPWM", "Set cooling fan PWM level - DEPRECATED: Use initPWMCoolFan (0x15)", 1, {"pwm_level"}},
+    {ctrlForceUp, "ctrlForceUp", "Force Up mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 2", 1, {"1"}},
+    {ctrlForceDown, "ctrlForceDown", "Force Down mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 4", 1, {"1"}},
+    {ctrlSleeping, "ctrlSleeping", "Sleep mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 0", 1, {"1"}}
 };
 
 static const size_t commandCount = sizeof(commands) / sizeof(commands[0]);
@@ -91,9 +93,9 @@ void displayMenu() {
     Serial.println("=====================================");
     Serial.println();
     
-    Serial.println("INIT Commands (0x10-0x21) - Initialize device parameters:");
+    Serial.println("INIT Commands (0x10-0x29) - Initialize device parameters:");
     for (size_t i = 0; i < commandCount; i++) {
-        if (commands[i].commandCode >= 0x10 && commands[i].commandCode <= 0x21) {
+        if (commands[i].commandCode >= 0x10 && commands[i].commandCode <= 0x29) {
             Serial.printf("[0x%02X] %s - %s\n", 
                          commands[i].commandCode, 
                          commands[i].name, 
@@ -102,9 +104,9 @@ void displayMenu() {
     }
     
     Serial.println();
-    Serial.println("REQUEST Commands (0x30-0x41) - Query current parameter values:");
+    Serial.println("REQUEST Commands (0x30-0x49) - Query current parameter values:");
     for (size_t i = 0; i < commandCount; i++) {
-        if (commands[i].commandCode >= 0x30 && commands[i].commandCode <= 0x41) {
+        if (commands[i].commandCode >= 0x30 && commands[i].commandCode <= 0x49) {
             Serial.printf("[0x%02X] %s - %s\n", 
                          commands[i].commandCode, 
                          commands[i].name, 
@@ -228,7 +230,7 @@ void executeCommand(uint8_t commandCode) {
             } else if (strstr(cmd->paramNames[i], "level") != nullptr || strstr(cmd->paramNames[i], "pwm") != nullptr) {
                 defaultValue = 5;  // Mid-level PWM
                 maxVal = 10;       // Max level 10
-            } else if (strstr(cmd->paramNames[i], "speed") != nullptr) {
+            } else if (strstr(cmd->paramNames[i], "speed") != nullptr || strstr(cmd->paramNames[i], "fan_speed") != nullptr) {
                 defaultValue = 2;  // Speed level 2
                 maxVal = 3;        // Max speed 3
             } else if (strstr(cmd->paramNames[i], "angle") != nullptr) {

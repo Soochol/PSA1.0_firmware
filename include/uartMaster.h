@@ -53,6 +53,7 @@
 #define initGyroAct     0x19    // Set heating angle (IMU active angle)
 #define initGyroRel     0x20    // Set cooling angle (IMU relative angle)
 #define initMode        0x21    // Set mode change (0: AI mode, 1: IMU mode)
+#define initPWMFan      0x22    // Set PWM fan speed (0-3)
 
 // REQUEST Commands (0x30-0x49) - Query current parameter values
 #define reqTempSleep    0x30    // Get sleep mode temperature
@@ -67,20 +68,21 @@
 #define reqGyroAct      0x39    // Get heating angle (IMU active angle)
 #define reqGyroRel      0x40    // Get cooling angle (IMU relative angle)
 #define reqMode         0x41    // Get current mode (0: AI mode, 1: IMU mode)
+#define reqPWMFan       0x42    // Get PWM fan speed
 
 // CONTROL Commands (0x50-0x69) - Real-time device control (Korean Protocol)
 #define ctrlReset       0x50    // Reset device
 #define ctrlMode        0x51    // Set device operating mode
-#define ctrlSpkVol      0x52    // Set speaker volume
+#define ctrlSpkOn       0x52    // Turn speaker on/off
 #define ctrlFanOn       0x53    // Turn main fan on/off
-#define ctrlFanPWM      0x54    // Set main fan speed (0-3)
+#define ctrlFanPWM      0x54    // Set main fan speed (0-3) - DEPRECATED: Use initPWMFan (0x22) instead
 #define ctrlCoolFanOn   0x55    // Turn cooling fan on/off
-#define ctrlCoolFanPWM  0x56    // Set cooling fan PWM level
+#define ctrlCoolFanPWM  0x56    // Set cooling fan PWM level - DEPRECATED: Use initPWMCoolFan (0x15) instead
 #define ctrlHeatPadOn   0x57    // Turn heat pad on/off
 #define ctrlHeatPadTemp 0x58    // Set heat pad temperature
-#define ctrlForceUp     0x59    // Force Up mode (ON=1 only)
-#define ctrlForceDown   0x60    // Force Down mode (ON=1 only)
-#define ctrlSleeping    0x61    // Sleep mode (ON=1 only)
+#define ctrlForceUp     0x59    // Force Up mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 2 instead
+#define ctrlForceDown   0x60    // Force Down mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 4 instead
+#define ctrlSleeping    0x61    // Sleep mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 0 instead
 
 // STATUS Commands (0x70-0x79) - Status and sensor data
 #define statMessage     0x70    // Sensor data message from STM
@@ -524,17 +526,18 @@ bool initSpeakerVolume(uint8_t volume_0_to_10);
 bool initGyroActiveAngle(uint8_t activeAngle);
 bool initGyroRelativeAngle(uint8_t relativeAngle);
 bool initDeviceMode(uint8_t mode);
+bool initPWMFanSpeed(uint8_t fanSpeed);
 bool setDeviceMode(DeviceMode mode);
 bool setBlowerFanState(bool enabled);
-bool setBlowerFanSpeed(uint8_t speed_0_to_3);
+bool setBlowerFanSpeed(uint8_t speed_0_to_3);  // DEPRECATED - Use initPWMFanSpeed() instead
 bool setCoolingFanState(bool enabled);
-bool setCoolingFanLevel(uint8_t level);
+bool setCoolingFanLevel(uint8_t level);  // DEPRECATED - Use initCoolingFanPWM() instead
 bool setHeatPadState(bool enabled);  // DEPRECATED - ctrlHeatPadOn not supported
 bool setHeatPadLevel(uint8_t level);  // DEPRECATED - ctrlHeatPadTemp not supported
-bool setSpeakerVolume(uint8_t volume_0_to_10);
-bool setForceUpMode();
-bool setForceDownMode(); 
-bool setSleepingMode();
+bool setSpeakerState(bool enabled);
+bool setForceUpMode();  // DEPRECATED - Use setDeviceMode(DeviceMode::FORCE_UP) instead
+bool setForceDownMode();  // DEPRECATED - Use setDeviceMode(DeviceMode::FORCE_DOWN) instead 
+bool setSleepingMode();  // DEPRECATED - Use setDeviceMode(DeviceMode::SLEEP) instead
 
 // -----------------------------------------------
 // Data Retrieval API (Getters)
@@ -557,6 +560,7 @@ uint8_t getForceDownDelay();
 uint8_t getGyroActiveAngle();
 uint8_t getGyroRelativeAngle();
 uint8_t getCurrentModeValue();
+uint8_t getPWMFanSpeed();
 
 // -----------------------------------------------
 // Asynchronous Data Requests (Non-blocking)
@@ -572,6 +576,7 @@ bool requestDetectionDelay();
 bool requestGyroActiveAngle();
 bool requestGyroRelativeAngle();
 bool requestCurrentMode();
+bool requestPWMFanSpeed();
 bool requestAllParameters();
 
 // -----------------------------------------------

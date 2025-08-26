@@ -358,6 +358,7 @@ typedef struct {
     uint8_t gyroActiveAngle;
     uint8_t gyroRelativeAngle;
     uint8_t currentModeValue;
+    uint8_t pwmFanSpeed;
 } SystemConfig_t;
 
 // =============================================================================

@@ -1388,6 +1388,17 @@ void handleRequestResponse() {
                 }
                 break;
                 
+            case reqPWMFan:         // 0x42
+                if (currentMessage.dataLength >= 1) {
+                    systemConfig.pwmFanSpeed = currentMessage.data[0];
+                    ESP_LOGI(TAG, "[REQUEST] STM → ESP (0x%02X), PWM Fan Speed: %d [%s]", 
+                             currentMessage.command, systemConfig.pwmFanSpeed, hexDump);
+                } else {
+                    ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), PWM Fan Speed: INVALID DATA (len=%d) [%s]", 
+                             currentMessage.command, currentMessage.dataLength, hexDump);
+                }
+                break;
+                
             default:
                 ESP_LOGW(TAG, "Unknown REQUEST response: 0x%02X", currentMessage.command);
                 break;
@@ -1760,6 +1771,7 @@ const char* getCommandName(uint8_t command) {
         case initGyroAct:       return "INIT: Heating Angle (IMU Active)";
         case initGyroRel:       return "INIT: Cooling Angle (IMU Relative)";
         case initMode:          return "INIT: Mode Change";
+        case initPWMFan:        return "INIT: PWM Fan Speed";
         
         // REQUEST Commands (0x3X)
         case reqTempSleep:      return "REQUEST: Sleep Temperature";
@@ -1774,20 +1786,21 @@ const char* getCommandName(uint8_t command) {
         case reqGyroAct:        return "REQUEST: Heating Angle (IMU Active)";
         case reqGyroRel:        return "REQUEST: Cooling Angle (IMU Relative)";
         case reqMode:           return "REQUEST: Current Mode";
+        case reqPWMFan:         return "REQUEST: PWM Fan Speed";
         
         // CONTROL Commands (0x5X)
         case ctrlReset:         return "CONTROL: Reset Device";
         case ctrlMode:          return "CONTROL: Set Device Mode";
-        case ctrlSpkVol:        return "CONTROL: Set Speaker Volume";
+        case ctrlSpkOn:         return "CONTROL: Turn Speaker On/Off";
         case ctrlFanOn:         return "CONTROL: Set Fan State";
-        case ctrlFanPWM:        return "CONTROL: Set Fan Speed";
+        case ctrlFanPWM:        return "CONTROL: Set Fan Speed (DEPRECATED)";
         case ctrlCoolFanOn:     return "CONTROL: Set Cooling Fan State";
-        case ctrlCoolFanPWM:    return "CONTROL: Set Cooling Fan Level";
+        case ctrlCoolFanPWM:    return "CONTROL: Set Cooling Fan Level (DEPRECATED)";
         case ctrlHeatPadOn:     return "CONTROL: Set Heat Pad State (DEPRECATED)";
         case ctrlHeatPadTemp:   return "CONTROL: Set Heat Pad Temperature (DEPRECATED)";
-        case ctrlForceUp:       return "CONTROL: Force Up Mode";
-        case ctrlForceDown:     return "CONTROL: Force Down Mode";
-        case ctrlSleeping:      return "CONTROL: Sleep Mode";
+        case ctrlForceUp:       return "CONTROL: Force Up Mode (DEPRECATED)";
+        case ctrlForceDown:     return "CONTROL: Force Down Mode (DEPRECATED)";
+        case ctrlSleeping:      return "CONTROL: Sleep Mode (DEPRECATED)";
         
         // STATUS Commands (0x7X)
         case statMessage:       return "STATUS: Sensor Data";
@@ -2085,6 +2098,21 @@ bool initDeviceMode(uint8_t mode) {
     }
     return success;
 }
+bool initPWMFanSpeed(uint8_t fanSpeed) {
+    if (fanSpeed > 3) {
+        ESP_LOGW(TAG, "Invalid PWM fan speed: %d (range: 0-3)", fanSpeed);
+        return false;
+    }
+    
+    byte data[] = {fanSpeed};
+    
+    bool success = sendCommandAsync(initPWMFan, data, 1);
+    if (success) {
+        ESP_LOGI(TAG, "PWM fan speed set to %d - Command: 0x%02X (%s)", 
+                 fanSpeed, initPWMFan, getCommandName(initPWMFan));
+    }
+    return success;
+}
 
 // =============================================================================
 // REQUEST Command Functions (0x30-0x41) - Parameter Query Functions
@@ -2135,6 +2163,9 @@ bool requestGyroRelativeAngle() {
 bool requestCurrentMode() {
     return sendCommandAsync(reqMode);
 }
+bool requestPWMFanSpeed() {
+    return sendCommandAsync(reqPWMFan);
+}
 
 bool requestAllParameters() {
     bool success = true;
@@ -2160,6 +2191,8 @@ bool requestAllParameters() {
     success &= requestGyroRelativeAngle();
     vTaskDelay(10 / portTICK_RATE_MS);
     success &= requestCurrentMode();
+    vTaskDelay(10 / portTICK_RATE_MS);
+    success &= requestPWMFanSpeed();
     
     ESP_LOGI(TAG, "All parameter requests sent %s", success ? "successfully" : "with errors");
     return success;
@@ -2192,17 +2225,12 @@ bool setDeviceMode(DeviceMode mode) {
 }
 
 // Audio Control Functions
-bool setSpeakerVolume(uint8_t volume_0_to_10) {
-    if (volume_0_to_10 > 10) {
-        ESP_LOGW(TAG, "Invalid volume: %d (max: 10)", volume_0_to_10);
-        return false;
-    }
+bool setSpeakerState(bool enabled) {
+    byte data[] = {enabled ? 1 : 0};
     
-    byte data[] = {volume_0_to_10};
-    
-    bool success = sendCommandAsync(ctrlSpkVol, data, 1);
+    bool success = sendCommandAsync(ctrlSpkOn, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Speaker volume set to %d", volume_0_to_10);
+        ESP_LOGI(TAG, "Speaker %s", enabled ? "ON" : "OFF");
     }
     return success;
 }
@@ -2219,6 +2247,8 @@ bool setBlowerFanState(bool enabled) {
 }
 
 bool setBlowerFanSpeed(uint8_t speed_0_to_3) {
+    ESP_LOGW(TAG, "DEPRECATED: setBlowerFanSpeed() is deprecated. Use initPWMFanSpeed() instead");
+    
     if (speed_0_to_3 > 3) {
         ESP_LOGW(TAG, "Invalid fan speed: %d (max: 3)", speed_0_to_3);
         return false;
@@ -2228,7 +2258,7 @@ bool setBlowerFanSpeed(uint8_t speed_0_to_3) {
     
     bool success = sendCommandAsync(ctrlFanPWM, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Fan speed set to %d", speed_0_to_3);
+        ESP_LOGI(TAG, "Fan speed set to %d (DEPRECATED)", speed_0_to_3);
     }
     return success;
 }
@@ -2245,6 +2275,8 @@ bool setCoolingFanState(bool enabled) {
 }
 
 bool setCoolingFanLevel(uint8_t level) {
+    ESP_LOGW(TAG, "DEPRECATED: setCoolingFanLevel() is deprecated. Use initCoolingFanPWM() instead");
+    
     if (level > 10) {
         ESP_LOGW(TAG, "Invalid cooling fan level: %d (max: 10)", level);
         return false;
@@ -2254,7 +2286,7 @@ bool setCoolingFanLevel(uint8_t level) {
     
     bool success = sendCommandAsync(ctrlCoolFanPWM, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Cooling fan level set to %d", level);
+        ESP_LOGI(TAG, "Cooling fan level set to %d (DEPRECATED)", level);
     }
     return success;
 }
@@ -2274,33 +2306,39 @@ bool setHeatPadLevel(uint8_t level) {
 
 // Force Mode Control Functions (Korean Protocol)
 bool setForceUpMode() {
+    ESP_LOGW(TAG, "DEPRECATED: setForceUpMode() is deprecated. Use setDeviceMode(DeviceMode::FORCE_UP) instead");
+    
     byte data[] = {1}; // Always send 1 as specified
     
     bool success = sendCommandAsync(ctrlForceUp, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Force Up mode activated - Command: 0x%02X (%s)", 
+        ESP_LOGI(TAG, "Force Up mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
                  ctrlForceUp, getCommandName(ctrlForceUp));
     }
     return success;
 }
 
 bool setForceDownMode() {
+    ESP_LOGW(TAG, "DEPRECATED: setForceDownMode() is deprecated. Use setDeviceMode(DeviceMode::FORCE_DOWN) instead");
+    
     byte data[] = {1}; // Always send 1 as specified
     
     bool success = sendCommandAsync(ctrlForceDown, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Force Down mode activated - Command: 0x%02X (%s)", 
+        ESP_LOGI(TAG, "Force Down mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
                  ctrlForceDown, getCommandName(ctrlForceDown));
     }
     return success;
 }
 
 bool setSleepingMode() {
+    ESP_LOGW(TAG, "DEPRECATED: setSleepingMode() is deprecated. Use setDeviceMode(DeviceMode::SLEEP) instead");
+    
     byte data[] = {1}; // Always send 1 as specified
     
     bool success = sendCommandAsync(ctrlSleeping, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Sleep mode activated - Command: 0x%02X (%s)", 
+        ESP_LOGI(TAG, "Sleep mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
                  ctrlSleeping, getCommandName(ctrlSleeping));
     }
     return success;
@@ -2441,5 +2479,8 @@ uint8_t getGyroRelativeAngle() {
 // Mode Configuration Getters (Korean Protocol)
 uint8_t getCurrentModeValue() {
     return systemConfig.currentModeValue;
+}
+uint8_t getPWMFanSpeed() {
+    return systemConfig.pwmFanSpeed;
 }
 
