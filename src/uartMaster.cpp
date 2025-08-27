@@ -508,6 +508,9 @@ void handleConsecutiveErrors(const char* errorType) {
 void handleStatusMessage() {
     parseSensorData(currentMessage.data, currentMessage.dataLength);
     
+    // Log processed sensor data for debugging
+    logSensorDataFormatted(getCurrentSensorData());
+    
     sendResponse(currentMessage.command);
     
     // Maintain existing TinyML logic
@@ -690,6 +693,7 @@ void handleEventMessage() {
             ESP_LOGI(TAG, "STM init complete"); // STM ready to start
 
             digitalWrite(PWM_ESP_HEATER, HIGH); // Turn on heater after STM init
+            ESP_LOGI(TAG, "ESP heater activated (GPIO %d)", PWM_ESP_HEATER);
 
             initUpperTemperatureLimit(80, 0);
             initOperatingTemperature(OperatingTempLevel::FORCE_LOW);
@@ -831,19 +835,14 @@ void parseSensorData(const uint8_t* data, size_t length) {
     }
     
     // Pressure sensors (4 bytes total: L + R)
-    // Format: First byte = integer part, Second byte = decimal part (e.g., 0x05 0x25 = 5.25g)
     // Left pressure sensor (2 bytes)
     if (index + 1 < length) {
-        uint8_t pressureInt = data[index];      // Integer part
-        uint8_t pressureDec = data[index + 1];  // Decimal part
-        allData.L_ads = (pressureInt * 100) + pressureDec;  // Store as integer.decimal format
+        allData.L_ads = (data[index] << 8) | data[index + 1];  // 16-bit integer value
         index += PRESSURE_DATA_SIZE;
     }
     // Right pressure sensor (2 bytes)
     if (index + 1 < length) {
-        uint8_t pressureInt = data[index];      // Integer part
-        uint8_t pressureDec = data[index + 1];  // Decimal part
-        allData.R_ads = (pressureInt * 100) + pressureDec;  // Store as integer.decimal format
+        allData.R_ads = (data[index] << 8) | data[index + 1];  // 16-bit integer value
         index += PRESSURE_DATA_SIZE;
     }
     
@@ -875,16 +874,12 @@ void parseSensorData(const uint8_t* data, size_t length) {
     // Format: First byte = integer part, Second byte = decimal part
     // Actuator displacement (2 bytes)
     if (index + 1 < length) {
-        uint8_t dispInt = data[index];      // Integer part (mm)
-        uint8_t dispDec = data[index + 1];  // Decimal part
-        allData.lmaLength = (dispInt * 100) + dispDec;  // Store as integer.decimal format
+        allData.lmaLength = (data[index] << 8) | data[index + 1];  // 16-bit integer value in mm
         index += TEMPERATURE_DATA_SIZE;
     }
     // Object distance (2 bytes)
     if (index + 1 < length) {
-        uint8_t distInt = data[index];      // Integer part (mm)
-        uint8_t distDec = data[index + 1];  // Decimal part
-        allData.objDistance = (distInt * 100) + distDec;  // Store as integer.decimal format
+        allData.objDistance = (data[index] << 8) | data[index + 1];  // 16-bit integer value in mm
         index += TEMPERATURE_DATA_SIZE;
     }
     // Battery voltage (2 bytes)
@@ -913,40 +908,32 @@ void parseSensorData(const uint8_t* data, size_t length) {
  * @param reading SensorReading structure with parsed sensor data
  */
 void logSensorDataFormatted(const SensorReading& reading) {
-    // Check if IMU data is active (non-zero values)
-    bool imuActive = (reading.leftGyro[0] != 0 || reading.leftGyro[1] != 0 || reading.leftGyro[2] != 0 ||
-                     reading.rightGyro[0] != 0 || reading.rightGyro[1] != 0 || reading.rightGyro[2] != 0 ||
-                     reading.leftAccel[0] != 0 || reading.leftAccel[1] != 0 || reading.leftAccel[2] != 0 ||
-                     reading.rightAccel[0] != 0 || reading.rightAccel[1] != 0 || reading.rightAccel[2] != 0);
     
     // Convert temperature values from integer.decimal format (e.g., 2464 = 24.64°C)
     float outsideTemp = reading.outsideTemp / 100.0f;
     float boardTemp = reading.boardTemp / 100.0f;
     float actuatorTemp = reading.actuatorTemp / 100.0f;
     
-    // Convert other sensor values from integer.decimal format
-    float leftPressure = reading.leftPressure / 100.0f;     // e.g., 525 = 5.25g
-    float rightPressure = reading.rightPressure / 100.0f;   // e.g., 325 = 3.25g
+    // Convert other sensor values from integer.decimal format  
+    int leftPressure = reading.leftPressure;     // Direct integer value
+    int rightPressure = reading.rightPressure;   // Direct integer value
     float batteryVoltage = reading.batteryVoltage / 100.0f;  // e.g., 1496 = 14.96V
-    float objectDistance = reading.objectDistance / 100.0f;  // e.g., 1250 = 12.50mm
-    float actuatorDisp = reading.actuatorDisplacement / 100.0f; // e.g., 825 = 8.25mm
+    int objectDistance = reading.objectDistance;  // Direct integer value in mm
+    int actuatorDisp = reading.actuatorDisplacement;         // Direct integer value in mm
     
     // Log formatted sensor data
-    ESP_LOGI(TAG, "[SENSOR] IMU:%s | Press:%.2fg/%.2fg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%.2fmm | Disp:%.2fmm | IMU_EVT:0x%02X/0x%02X",
-             imuActive ? "ON" : "OFF",
+    ESP_LOGI(TAG, "[SENSOR] Press:%dg/%dg | Temp:%.2f°C,%.2f°C,%.2f°C | Batt:%.2fV | Obj:%dmm | Disp:%dmm | IMU_EVT:0x%02X/0x%02X",
              leftPressure, rightPressure,
              outsideTemp, boardTemp, actuatorTemp,
              batteryVoltage, objectDistance, actuatorDisp,
              reading.leftIMUEvent, reading.rightIMUEvent);
     
-    // Log IMU details only if active
-    if (imuActive) {
-        ESP_LOGI(TAG, "[IMU] L_Gyro:[%d,%d,%d] L_Accel:[%d,%d,%d] R_Gyro:[%d,%d,%d] R_Accel:[%d,%d,%d]",
-                 reading.leftGyro[0], reading.leftGyro[1], reading.leftGyro[2],
-                 reading.leftAccel[0], reading.leftAccel[1], reading.leftAccel[2],
-                 reading.rightGyro[0], reading.rightGyro[1], reading.rightGyro[2],
-                 reading.rightAccel[0], reading.rightAccel[1], reading.rightAccel[2]);
-    }
+    // Log IMU details
+    ESP_LOGI(TAG, "[IMU] L_Gyro:[%d,%d,%d] L_Accel:[%d,%d,%d] R_Gyro:[%d,%d,%d] R_Accel:[%d,%d,%d]",
+             reading.leftGyro[0], reading.leftGyro[1], reading.leftGyro[2],
+             reading.leftAccel[0], reading.leftAccel[1], reading.leftAccel[2],
+             reading.rightGyro[0], reading.rightGyro[1], reading.rightGyro[2],
+             reading.rightAccel[0], reading.rightAccel[1], reading.rightAccel[2]);
 }
 
 /**
@@ -1021,13 +1008,11 @@ void usartMasterHandler(void *pvParameters) {
                 
                 // Raw packet logging and message info
                 // Show raw packet data for debugging
-                /*
                 printf("[%6d] [RAW] ", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
                 for (size_t i = 0; i < expectedTotalLength && i < bufferIndex; i++) {
                     printf("%02X ", messageBuffer[i]);
                 }
                 printf("(%zu bytes)\n", bufferIndex);
-                */
                 
                 if (currentMessage.command == statMessage) {
                     // For sensor data, minimal logging (detailed in handleStatusMessage)
