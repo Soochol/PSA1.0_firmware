@@ -706,6 +706,7 @@ void handleEventMessage() {
             initGyroRelativeAngle(5);
 
             initDeviceMode(1);    //imu mode, it should be set to ai mode later
+            initWearableFanSpeed(0); //initial fan speed 0
 
             break;
 
@@ -1040,7 +1041,7 @@ void usartMasterHandler(void *pvParameters) {
                 
                 // Enhanced protocol validation with command-type-specific direction checking
                 const char* validationError = nullptr;
-                if (!currentMessage.isValidStrictWithCommandCheck(&validationError)) {
+                if (!currentMessage.isValidStrict(&validationError)) {
                     ESP_LOGW(TAG, "[STM-ERR] Protocol validation failed: %s", validationError);
                     ESP_LOGW(TAG, "[STM-ERR] Frame details: STM=0x%02X (expect 0x%02X), DIR=0x%02X, CMD=0x%02X, ETX=0x%02X (expect 0x%02X)", 
                              currentMessage.stm, STM, currentMessage.direction, currentMessage.command,
@@ -1308,11 +1309,6 @@ void handleRequestResponse() {
                     ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Operating Temp: INVALID DATA (len=%d) [%s]", 
                              currentMessage.command, currentMessage.dataLength, hexDump);
                 }
-                break;
-                
-            case reqTempHeatPad:    // 0x33 - DEPRECATED
-                ESP_LOGW(TAG, "[REQUEST] STM → ESP (0x%02X), Heat Pad Temp: DEPRECATED [%s]", 
-                         currentMessage.command, hexDump);
                 break;
                 
             case reqUpperTemp:      // 0x34
@@ -1630,7 +1626,7 @@ void emergencyShutdown() {
     digitalWrite(PWM_ESP_HEATER, LOW);  // 히터 끄기
     
     // STM 제어 장치 (통신 가능한 경우)
-    setBlowerFanState(false);           // 송풍 팬 끄기
+    setWearableFanState(false);         // 웨어러블 팬 끄기
     setCoolingFanState(false);           // 냉각팬 끄기 (히터 잔열 제거)
     // STM error state는 currentStmState로 추적됨 - STM과 통신 불가능한 상태일 수 있음
     
@@ -1753,7 +1749,6 @@ const char* getCommandName(uint8_t command) {
         case initTempSleep:     return "INIT: Sleep Temperature";
         case initTempWaiting:   return "INIT: Waiting Temperature";
         case initTempForceUp:   return "INIT: Operating Temperature";
-        case initTempHeatPad:   return "INIT: Heat Pad Temperature (DEPRECATED)";
         case initPWMCoolFan:    return "INIT: Cooling Fan PWM";
         case initTout:          return "INIT: Timeout Settings";
         case initTempLimit:     return "INIT: Upper Temperature Limit";
@@ -1762,13 +1757,12 @@ const char* getCommandName(uint8_t command) {
         case initGyroAct:       return "INIT: Heating Angle (IMU Active)";
         case initGyroRel:       return "INIT: Cooling Angle (IMU Relative)";
         case initMode:          return "INIT: Mode Change";
-        case initPWMFan:        return "INIT: PWM Fan Speed";
+        case initWearableFanPWM:        return "INIT: Wearable Fan PWM Speed";
         
         // REQUEST Commands (0x3X)
         case reqTempSleep:      return "REQUEST: Sleep Temperature";
         case reqTempWaiting:    return "REQUEST: Waiting Temperature";
         case reqTempForceUp:    return "REQUEST: Operating Temperature";
-        case reqTempHeatPad:    return "REQUEST: Heat Pad Temperature (DEPRECATED)";
         case reqUpperTemp:      return "REQUEST: Upper Temperature Limit";
         case reqPWMCoolFan:     return "REQUEST: Cooling Fan Level";
         case reqTimeout:        return "REQUEST: Timeout Settings";
@@ -1783,15 +1777,8 @@ const char* getCommandName(uint8_t command) {
         case ctrlReset:         return "CONTROL: Reset Device";
         case ctrlMode:          return "CONTROL: Set Device Mode";
         case ctrlSpkOn:         return "CONTROL: Turn Speaker On/Off";
-        case ctrlFanOn:         return "CONTROL: Set Fan State";
-        case ctrlFanPWM:        return "CONTROL: Set Fan Speed (DEPRECATED)";
+        case ctrlWearableFanOn:         return "CONTROL: Set Wearable Fan State";
         case ctrlCoolFanOn:     return "CONTROL: Set Cooling Fan State";
-        case ctrlCoolFanPWM:    return "CONTROL: Set Cooling Fan Level (DEPRECATED)";
-        case ctrlHeatPadOn:     return "CONTROL: Set Heat Pad State (DEPRECATED)";
-        case ctrlHeatPadTemp:   return "CONTROL: Set Heat Pad Temperature (DEPRECATED)";
-        case ctrlForceUp:       return "CONTROL: Force Up Mode (DEPRECATED)";
-        case ctrlForceDown:     return "CONTROL: Force Down Mode (DEPRECATED)";
-        case ctrlSleeping:      return "CONTROL: Sleep Mode (DEPRECATED)";
         
         // STATUS Commands (0x7X)
         case statMessage:       return "STATUS: Sensor Data";
@@ -1845,7 +1832,7 @@ bool initSleepTemperature(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandFireAndForget(initTempSleep, data, 2);
+    bool success = sendCommandAsync(initTempSleep, data, 2);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Sleep Temp: %d.%02d°C [%s]", 
                  initTempSleep, tempInt, tempDec, hexDump);
@@ -1903,7 +1890,7 @@ bool initOperatingTemperature(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandFireAndForget(initTempForceUp, data, 2);
+    bool success = sendCommandAsync(initTempForceUp, data, 2);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Operating Temp: %d.%02d°C [%s]", 
                  initTempForceUp, tempInt, tempDec, hexDump);
@@ -1934,7 +1921,7 @@ bool initUpperTemperatureLimit(uint8_t tempInt, uint8_t tempDec) {
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandFireAndForget(initTempLimit, data, 2); // initTempLimit command
+    bool success = sendCommandAsync(initTempLimit, data, 2); // initTempLimit command
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Upper Temp Limit: %d.%02d°C [%s]", 
                  initTempLimit, tempInt, tempDec, hexDump);
@@ -1974,7 +1961,7 @@ bool initTimeoutConfiguration(uint16_t forceUpTimeout, uint16_t forceOnTimeout, 
         snprintf(hexDump + strlen(hexDump), sizeof(hexDump) - strlen(hexDump), "%02X ", buffer[i]);
     }
     
-    bool success = sendCommandFireAndForget(initTout, data, 8);
+    bool success = sendCommandAsync(initTout, data, 8);
     if (success) {
         ESP_LOGI(TAG, "[INIT] ESP → STM (0x%02X), Timeout Config: Up=%d, On=%d, Down=%d, Wait=%d [%s]", 
                  initTout, forceUpTimeout, forceOnTimeout, forceDownTimeout, waitingTimeout, hexDump);
@@ -2118,7 +2105,7 @@ bool initDeviceMode(uint8_t mode) {
     }
     return success;
 }
-bool initPWMFanSpeed(uint8_t fanSpeed) {
+bool initWearableFanSpeed(uint8_t fanSpeed) {
     if (fanSpeed > 3) {
         ESP_LOGW(TAG, "Invalid PWM fan speed: %d (range: 0-3)", fanSpeed);
         return false;
@@ -2126,10 +2113,10 @@ bool initPWMFanSpeed(uint8_t fanSpeed) {
     
     byte data[] = {fanSpeed};
     
-    bool success = sendCommandAsync(initPWMFan, data, 1);
+    bool success = sendCommandAsync(initWearableFanPWM, data, 1);
     if (success) {
         ESP_LOGI(TAG, "PWM fan speed set to %d - Command: 0x%02X (%s)", 
-                 fanSpeed, initPWMFan, getCommandName(initPWMFan));
+                 fanSpeed, initWearableFanPWM, getCommandName(initWearableFanPWM));
     }
     return success;
 }
@@ -2266,32 +2253,16 @@ bool setSpeakerState(bool enabled) {
 }
 
 // Actuator Control Functions - Fan
-bool setBlowerFanState(bool enabled) {
+bool setWearableFanState(bool enabled) {
     byte data[] = {enabled ? 1 : 0};
     
-    bool success = sendCommandAsync(ctrlFanOn, data, 1);
+    bool success = sendCommandAsync(ctrlWearableFanOn, data, 1);
     if (success) {
-        ESP_LOGI(TAG, "Fan %s", enabled ? "ON" : "OFF");
+        ESP_LOGI(TAG, "Wearable Fan %s", enabled ? "ON" : "OFF");
     }
     return success;
 }
 
-bool setBlowerFanSpeed(uint8_t speed_0_to_3) {
-    ESP_LOGW(TAG, "DEPRECATED: setBlowerFanSpeed() is deprecated. Use initPWMFanSpeed() instead");
-    
-    if (speed_0_to_3 > 3) {
-        ESP_LOGW(TAG, "Invalid fan speed: %d (max: 3)", speed_0_to_3);
-        return false;
-    }
-    
-    byte data[] = {speed_0_to_3};
-    
-    bool success = sendCommandAsync(ctrlFanPWM, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Fan speed set to %d (DEPRECATED)", speed_0_to_3);
-    }
-    return success;
-}
 
 // Actuator Control Functions - Cooling Fan
 bool setCoolingFanState(bool enabled) {
@@ -2304,75 +2275,6 @@ bool setCoolingFanState(bool enabled) {
     return success;
 }
 
-bool setCoolingFanLevel(uint8_t level) {
-    ESP_LOGW(TAG, "DEPRECATED: setCoolingFanLevel() is deprecated. Use initCoolingFanPWM() instead");
-    
-    if (level > 10) {
-        ESP_LOGW(TAG, "Invalid cooling fan level: %d (max: 10)", level);
-        return false;
-    }
-    
-    byte data[] = {level};
-    
-    bool success = sendCommandAsync(ctrlCoolFanPWM, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Cooling fan level set to %d (DEPRECATED)", level);
-    }
-    return success;
-}
-
-// Actuator Control Functions - Heat Pad (DEPRECATED)
-bool setHeatPadState(bool enabled) {
-    // This function is deprecated - ctrlHeatPadOn (0x57) is not supported
-    ESP_LOGW(TAG, "setHeatPadState is deprecated - ctrlHeatPadOn (0x57) not supported");
-    return false;
-}
-
-bool setHeatPadLevel(uint8_t level) {
-    // This function is deprecated - ctrlHeatPadTemp (0x58) is not supported
-    ESP_LOGW(TAG, "setHeatPadLevel is deprecated - ctrlHeatPadTemp (0x58) not supported");
-    return false;
-}
-
-// Force Mode Control Functions (Korean Protocol)
-bool setForceUpMode() {
-    ESP_LOGW(TAG, "DEPRECATED: setForceUpMode() is deprecated. Use setDeviceMode(DeviceMode::FORCE_UP) instead");
-    
-    byte data[] = {1}; // Always send 1 as specified
-    
-    bool success = sendCommandAsync(ctrlForceUp, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Force Up mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
-                 ctrlForceUp, getCommandName(ctrlForceUp));
-    }
-    return success;
-}
-
-bool setForceDownMode() {
-    ESP_LOGW(TAG, "DEPRECATED: setForceDownMode() is deprecated. Use setDeviceMode(DeviceMode::FORCE_DOWN) instead");
-    
-    byte data[] = {1}; // Always send 1 as specified
-    
-    bool success = sendCommandAsync(ctrlForceDown, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Force Down mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
-                 ctrlForceDown, getCommandName(ctrlForceDown));
-    }
-    return success;
-}
-
-bool setSleepingMode() {
-    ESP_LOGW(TAG, "DEPRECATED: setSleepingMode() is deprecated. Use setDeviceMode(DeviceMode::SLEEP) instead");
-    
-    byte data[] = {1}; // Always send 1 as specified
-    
-    bool success = sendCommandAsync(ctrlSleeping, data, 1);
-    if (success) {
-        ESP_LOGI(TAG, "Sleep mode activated (DEPRECATED) - Command: 0x%02X (%s)", 
-                 ctrlSleeping, getCommandName(ctrlSleeping));
-    }
-    return success;
-}
 
 // setPoseDetectionMode function removed - ctrlPose (0x5A) doesn't exist in specification
 

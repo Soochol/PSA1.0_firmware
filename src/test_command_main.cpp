@@ -52,7 +52,7 @@ static const CommandTest commands[] = {
     {initGyroAct, "initGyroAct", "Set heating angle (IMU active angle)", 1, {"active_angle"}},
     {initGyroRel, "initGyroRel", "Set cooling angle (IMU relative angle)", 1, {"relative_angle"}},
     {initMode, "initMode", "Set mode change (0: AI mode, 1: IMU mode)", 1, {"mode"}},
-    {initPWMFan, "initPWMFan", "Set PWM fan speed (0-3)", 1, {"fan_speed"}},
+    {initWearableFanPWM, "initWearableFanPWM", "Set wearable fan PWM speed (0-3)", 1, {"fan_speed"}},
     
     // REQUEST Commands (0x30-0x41)
     {reqTempSleep, "reqTempSleep", "Get sleep mode temperature", 0, {}},
@@ -72,13 +72,8 @@ static const CommandTest commands[] = {
     {ctrlReset, "ctrlReset", "Reset device", 0, {}},
     {ctrlMode, "ctrlMode", "Set device operating mode", 1, {"mode"}},
     {ctrlSpkOn, "ctrlSpkOn", "Turn speaker on/off", 1, {"on_off_1_0"}},
-    {ctrlFanOn, "ctrlFanOn", "Turn main fan on/off", 1, {"on_off_1_0"}},
-    {ctrlFanPWM, "ctrlFanPWM", "Set main fan speed (0-3) - DEPRECATED: Use initPWMFan (0x22)", 1, {"speed_0_to_3"}},
-    {ctrlCoolFanOn, "ctrlCoolFanOn", "Turn cooling fan on/off", 1, {"on_off_1_0"}},
-    {ctrlCoolFanPWM, "ctrlCoolFanPWM", "Set cooling fan PWM level - DEPRECATED: Use initPWMCoolFan (0x15)", 1, {"pwm_level"}},
-    {ctrlForceUp, "ctrlForceUp", "Force Up mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 2", 1, {"1"}},
-    {ctrlForceDown, "ctrlForceDown", "Force Down mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 4", 1, {"1"}},
-    {ctrlSleeping, "ctrlSleeping", "Sleep mode (ON=1 only) - DEPRECATED: Use ctrlMode (0x51) with value 0", 1, {"1"}}
+    {ctrlWearableFanOn, "ctrlWearableFanOn", "Turn wearable fan on/off", 1, {"on_off_1_0"}},
+    {ctrlCoolFanOn, "ctrlCoolFanOn", "Turn cooling fan on/off", 1, {"on_off_1_0"}}
 };
 
 static const size_t commandCount = sizeof(commands) / sizeof(commands[0]);
