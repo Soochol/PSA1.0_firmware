@@ -705,7 +705,7 @@ void handleEventMessage() {
             initGyroActiveAngle(20);
             initGyroRelativeAngle(5);
 
-            initDeviceMode(1);    //imu mode, it should be set to ai mode later
+            initDeviceMode(0);    //0: ai mode, 1: imu mode
             initWearableFanSpeed(0); //initial fan speed 0
 
             break;

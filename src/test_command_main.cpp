@@ -239,6 +239,16 @@ void executeCommand(uint8_t commandCode) {
                 // For ctrlMode (0x51): default to SLEEP mode  
                 defaultValue = (commandCode == initMode) ? 1 : 0;  // IMU mode for initMode, SLEEP for ctrlMode
                 maxVal = (commandCode == initMode) ? 1 : 4;        // Max mode 1 for initMode, 4 for ctrlMode
+                
+                // Display mode options for ctrlMode command
+                if (commandCode == ctrlMode) {
+                    Serial.println("Available Device Modes:");
+                    Serial.println("  0 = SLEEP      - Device in sleep mode");
+                    Serial.println("  1 = WAITING    - Waiting for user input/detection");
+                    Serial.println("  2 = FORCE_UP   - Actively raising posture");
+                    Serial.println("  3 = FORCE_ON   - Maintaining raised posture");
+                    Serial.println("  4 = FORCE_DOWN - Lowering posture");
+                }
             } else if (strstr(cmd->paramNames[i], "on_off") != nullptr || strcmp(cmd->paramNames[i], "1") == 0) {
                 defaultValue = 1;  // ON
                 maxVal = 1;        // Only 0 or 1
@@ -351,7 +361,11 @@ void setup() {
     esp_log_level_set(TAG, ESP_LOG_INFO);
     // esp_log_level_set("uartMaster.cpp", ESP_LOG_ERROR);
     
+    // Set heating available
+    pinMode(PWM_ESP_HEATER, OUTPUT);
+    
     ESP_LOGI(TAG, "=== ESP32→STM32 Command Test Program Starting ===");
+    
     
     // Initialize UART Master for STM32 communication
     ESP_LOGI(TAG, "[SETUP] Initializing UART Master...");
